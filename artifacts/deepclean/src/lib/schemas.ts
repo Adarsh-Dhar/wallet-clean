@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
 
 export const threatAnalysisSchema = z.object({
   objectId: z.string().min(1, "Object ID is required"),
@@ -12,7 +13,11 @@ export const threatAnalysisSchema = z.object({
 export type ThreatAnalysisFormValues = z.infer<typeof threatAnalysisSchema>;
 
 export const walletSchema = z.object({
-  address: z.string().min(1, "Address is required"),
+  address: z
+    .string()
+    .min(1, "Address is required")
+    .transform((value) => normalizeSuiAddress(value))
+    .refine((value) => isValidSuiAddress(value), "Invalid Sui address"),
   label: z.string().min(1, "Label is required"),
 });
 

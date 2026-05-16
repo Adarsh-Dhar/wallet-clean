@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useListThreats, useReleaseThreat, useBurnThreat, getListThreatsQueryKey } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Skeleton } from "@/components/ui/skeleton";
 import { VerdictBadge, StatusBadge, RiskBar } from "@/components/ThreatBadge";
@@ -8,6 +8,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Button } from "@/components/ui/button";
 import { Unlock, Flame, ExternalLink } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+
+const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
 export default function Threats() {
   const [verdict, setVerdict] = useState<string>("all");
@@ -43,6 +45,26 @@ export default function Threats() {
         queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
         toast({ title: "Asset burned", description: "The malicious asset has been permanently destroyed." });
       },
+    },
+  });
+
+  const cleanAll = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(new URL("/api/clean-wallet", API_BASE).toString(), {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json() as Promise<{ cleaned: number }>;
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+      toast({
+        title: `🧹 ${result.cleaned} threats cleaned`,
+        description: "All quarantined assets have been burned by the AI agent.",
+      });
+    },
+    onError: () => {
+      toast({ title: "Clean failed", variant: "destructive" });
     },
   });
 
@@ -82,6 +104,17 @@ export default function Threats() {
             Clear filters
           </Button>
         )}
+        <Button
+          size="sm"
+          variant="destructive"
+          className="ml-auto gap-2"
+          onClick={() => cleanAll.mutate()}
+          disabled={cleanAll.isPending}
+          data-testid="button-clean-all"
+        >
+          <Flame className="w-4 h-4" />
+          {cleanAll.isPending ? "Cleaning…" : "Deep Clean All"}
+        </Button>
       </div>
 
       {/* Table */}
@@ -124,7 +157,7 @@ export default function Threats() {
                       <ExternalLink className="w-3 h-3" />
                     </button>
                   </td>
-                  <td className="px-4 py-3 text-xs text-muted-foreground font-mono truncate max-w-[140px]">
+                  <td className="px-4 py-3 text-xs text-muted-foreground font-mono truncate max-w-35">
                     {t.objectType.split("::").pop()}
                   </td>
                   <td className="px-4 py-3"><VerdictBadge verdict={t.verdict} /></td>

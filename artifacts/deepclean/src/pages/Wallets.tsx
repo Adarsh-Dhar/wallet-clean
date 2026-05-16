@@ -50,10 +50,15 @@ interface PopulateResult {
   }>;
 }
 
+interface CleanResult {
+  cleaned: number;
+  threats: number[];
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const LOCAL_WALLETS_KEY = "deepclean.localWatchedWallets";
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8080";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -89,6 +94,14 @@ async function populateWalletApi(targetAddress: string): Promise<PopulateResult>
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json() as Promise<PopulateResult>;
+}
+
+async function cleanWalletApi(): Promise<CleanResult> {
+  const res = await fetch(new URL("/api/clean-wallet", API_BASE).toString(), {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json() as Promise<CleanResult>;
 }
 
 // ─── Log panel colours ────────────────────────────────────────────────────────
@@ -333,6 +346,24 @@ export default function Wallets() {
     },
   });
 
+  async function performDeepClean(walletId: number) {
+    appendSeedLog(walletId, mkLog("info", "  Cleaning quarantined threats…"));
+    try {
+      const cleanResult = await cleanWalletApi();
+      appendSeedLog(walletId, mkLog("success", `✓ Deep clean complete — ${cleanResult.cleaned} threats burned`));
+      return true;
+    } catch (cleanError) {
+      appendSeedLog(walletId, mkLog("error", "✗ Deep clean failed"));
+      appendSeedLog(walletId, mkLog("error", String(cleanError)));
+      toast({
+        title: "Deep clean failed",
+        description: String(cleanError),
+        variant: "destructive",
+      });
+      return false;
+    }
+  }
+
   // ── Seed spam mutation (with detailed logs) ───────────────────────────────
   const populate = useMutation({
     mutationFn: ({ address }: { address: string }) => populateWalletApi(address),
@@ -356,7 +387,7 @@ export default function Wallets() {
       appendSeedLog(walletId, mkLog("info", "Sending all 5 to Gemini AI for analysis…"));
     },
 
-    onSuccess: (result, { address }) => {
+    onSuccess: async (result, { address }) => {
       const wallet = mergedWallets.find((w) => w.address === address);
       const walletId = wallet?.id ?? -1;
       setPopulatingId(null);
@@ -393,6 +424,11 @@ export default function Wallets() {
       }
       if (result.txDigest) {
         appendSeedLog(walletId, mkLog("success", `✓ On-chain tx recorded`, `  digest: ${result.txDigest}`));
+      }
+
+      if (quarantined.length > 0) {
+        const cleaned = await performDeepClean(walletId);
+        if (!cleaned) return;
       }
 
       appendSeedLog(walletId, mkLog("success", "✓ Dashboard & threat list refreshed"));

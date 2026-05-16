@@ -2,6 +2,7 @@
 import { Router } from "express";
 import { prisma } from "@workspace/db";
 import { AddWatchedWalletBody, RemoveWatchedWalletParams } from "@workspace/api-zod";
+import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
 
 const router = Router();
 
@@ -27,9 +28,15 @@ router.post("/monitor/wallets", async (req, res) => {
     return;
   }
 
+  const normalizedAddress = normalizeSuiAddress(body.data.address);
+  if (!isValidSuiAddress(normalizedAddress)) {
+    res.status(400).json({ error: "Invalid Sui address" });
+    return;
+  }
+
   const wallet = await prisma.watchedWallet.create({
     data: {
-      address:  body.data.address,
+      address:  normalizedAddress,
       label:    body.data.label,
       isActive: true,
     },

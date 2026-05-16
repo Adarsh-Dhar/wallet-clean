@@ -233,4 +233,30 @@ router.post("/threats/:id/burn", async (req, res) => {
   });
 });
 
+// POST /clean-wallet — AI-confirmed bulk burn of all quarantined threats
+router.post("/clean-wallet", async (req, res) => {
+  const quarantined = await prisma.threat.findMany({
+    where: { status: "quarantined" },
+  });
+
+  if (quarantined.length === 0) {
+    res.json({ cleaned: 0, threats: [] });
+    return;
+  }
+
+  // Burn them all in DB
+  const ids = quarantined.map((t) => t.id);
+  await prisma.threat.updateMany({
+    where: { id: { in: ids } },
+    data:  { status: "burned" },
+  });
+
+  req.log.info({ count: ids.length }, "AI deep clean complete — threats burned");
+
+  res.json({
+    cleaned: ids.length,
+    threats: ids,
+  });
+});
+
 export default router;

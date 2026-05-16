@@ -3,6 +3,7 @@ import { prisma } from "@workspace/db";
 import { analyzeThreat } from "./gemini";
 import { storeThreatLog, buildThreatLog } from "./walrus";
 import { logger } from "./logger";
+import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
 
 const SUI_NETWORK      = process.env["SUI_NETWORK"]             ?? "testnet";
 const POLL_INTERVAL_MS = Number(process.env["MONITOR_POLL_INTERVAL_MS"] ?? 30_000);
@@ -81,7 +82,13 @@ async function poll(): Promise<void> {
 
 async function pollWallet(address: string): Promise<void> {
   try {
-    const cursor = state.cursors.get(address) ?? null;
+    const normalizedAddress = normalizeSuiAddress(address);
+    if (!isValidSuiAddress(normalizedAddress)) {
+      logger.warn({ address }, "Skipping invalid wallet address");
+      return;
+    }
+
+    const cursor = state.cursors.get(normalizedAddress) ?? null;
 
     const result = await suiRpc<{
       data: Array<{
@@ -92,7 +99,7 @@ async function pollWallet(address: string): Promise<void> {
       nextCursor: string | null;
       hasNextPage: boolean;
     }>("suix_queryTransactionBlocks", [
-      { filter: { ToAddress: address }, options: { showInput: true, showEffects: true, showObjectChanges: false } },
+      { filter: { ToAddress: normalizedAddress }, options: { showInput: true, showEffects: true, showObjectChanges: false } },
       cursor,
       10,
       false,
@@ -101,10 +108,10 @@ async function pollWallet(address: string): Promise<void> {
     if (!result?.data?.length) return;
 
     const latestDigest = result.data[0]?.digest;
-    if (latestDigest) state.cursors.set(address, latestDigest);
+    if (latestDigest) state.cursors.set(normalizedAddress, latestDigest);
 
     if (cursor === null && result.data.length > 0) {
-      logger.debug({ address, txCount: result.data.length }, "Baseline established for wallet");
+      logger.debug({ address: normalizedAddress, txCount: result.data.length }, "Baseline established for wallet");
       return;
     }
 
@@ -123,7 +130,7 @@ async function pollWallet(address: string): Promise<void> {
         const objectType  = objectData?.type ?? "unknown::module::Unknown";
         const senderAddress = tx.transaction?.data?.transaction?.kind ?? address;
 
-        logger.info({ objectId, objectType, address }, "New object detected for monitored wallet");
+        logger.info({ objectId, objectType, address: normalizedAddress }, "New object detected for monitored wallet");
         await analyzeAndStore(objectId, objectType, senderAddress, address);
       }
     }
