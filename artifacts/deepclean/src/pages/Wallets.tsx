@@ -411,13 +411,23 @@ export default function Wallets() {
       appendSeedLog(walletId, mkLog("info", "Starting wallet population…"));
       appendSeedLog(walletId, mkLog("info", `Target: ${address}`));
       appendSeedLog(walletId, mkLog("info", "POST /api/populate-wallet →"));
-      appendSeedLog(walletId, mkLog("info", "Injecting 5 synthetic spam objects:"));
-      appendSeedLog(walletId, mkLog("info", "  [1] scam_airdrop::FreeToken — fake SUI airdrop URL"));
-      appendSeedLog(walletId, mkLog("info", "  [2] phishing_kit::WalletDrainer — Cyrillic homoglyph URL"));
-      appendSeedLog(walletId, mkLog("info", "  [3] honeypot_defi::HoneypotToken — hidden _drain_all ABI"));
-      appendSeedLog(walletId, mkLog("info", "  [4] fake_foundation::FounderPass — digit-substitution domain"));
-      appendSeedLog(walletId, mkLog("info", "  [5] nft_phish::MintPass — phishing mint URL"));
-      appendSeedLog(walletId, mkLog("info", "Sending all 5 to Gemini AI for analysis…"));
+      appendSeedLog(walletId, mkLog("info", "Injecting 10 synthetic spam + 5 legit objects:"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] scam_airdrop::FreeToken — fake SUI airdrop URL"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] phishing_kit::WalletDrainer — Cyrillic homoglyph URL"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] honeypot_defi::HoneypotToken — hidden _drain_all ABI"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] fake_foundation::FounderPass — digit-substitution domain"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] nft_phish::MintPass — phishing mint URL"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] fake_cetus::LPReceipt — fake Cetus rewards"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] approval_phish::ApprovalRequest — homoglyph sweep ABI"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] dust_attack::TrackingDust — dust tracking"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] rug_token::MemeCoin — freeze_all + migrate_funds ABI"));
+      appendSeedLog(walletId, mkLog("warn", "  [spam] fake_governance::VoteProposal — fake DAO vote"));
+      appendSeedLog(walletId, mkLog("success", "  [legit] coin::Coin — native SUI coin"));
+      appendSeedLog(walletId, mkLog("success", "  [legit] coin::USDC — Circle USD Coin"));
+      appendSeedLog(walletId, mkLog("success", "  [legit] pool::Position — Cetus LP Position"));
+      appendSeedLog(walletId, mkLog("success", "  [legit] clob_v2::Order — DeepBook Order"));
+      appendSeedLog(walletId, mkLog("success", "  [legit] kiosk::Kiosk — Sui Kiosk"));
+      appendSeedLog(walletId, mkLog("info", "Sending all 15 to Gemini AI for analysis…"));
     },
 
     onSuccess: async (result, { address }) => {
@@ -614,7 +624,7 @@ export default function Wallets() {
                   className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-cyan-400 hover:bg-cyan-500/10 shrink-0"
                   onClick={() => populate.mutate({ address: wallet.address })}
                   disabled={populatingId === wallet.id || cleaningId === wallet.id}
-                  title="Seed wallet with 5 synthetic spam objects for demo"
+                  title="Seed wallet with 10 spam + 5 legit synthetic objects for demo"
                   data-testid={`button-seed-wallet-${wallet.id}`}
                 >
                   {populatingId === wallet.id ? (

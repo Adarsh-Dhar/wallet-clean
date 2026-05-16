@@ -381,6 +381,158 @@ Analyze this asset and return ONLY the JSON verdict.`;
   });
 }
 
+// ─── Batch analysis (one Gemini call for all objects) ─────────────────────────
+
+export interface BatchThreatInput {
+  objectId: string;
+  objectType: string;
+  senderAddress: string;
+  displayName?: string | null;
+  displayUrl?: string | null;
+  moveAbi?: string | null;
+}
+
+export interface BatchThreatOutput {
+  objectId: string;
+  risk_score: number;
+  verdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS";
+  reason_code: number;
+  confidence: number;
+  flags: string[];
+  reasoning: string;
+}
+
+export async function analyzeThreatBatch(
+  inputs: BatchThreatInput[]
+): Promise<BatchThreatOutput[]> {
+  if (!GEMINI_API_KEY) {
+    logger.warn("GEMINI_API_KEY not set, returning mock batch analysis");
+    return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
+  }
+
+  const itemsText = inputs
+    .map(
+      (obj, i) => `### Object ${i + 1}
+- objectId: ${obj.objectId}
+- objectType: ${obj.objectType}
+- senderAddress: ${obj.senderAddress}
+- displayName: ${obj.displayName ?? "N/A"}
+- displayUrl: ${obj.displayUrl ?? "N/A"}
+- moveAbi: ${obj.moveAbi ?? "Not available"}`
+    )
+    .join("\n\n");
+
+  const batchPrompt = `You are a Sui blockchain security agent. Analyze each object below and return a JSON array — one verdict object per input, in the same order.
+
+Each verdict must have:
+{
+  "objectId": "<copy from input>",
+  "risk_score": 0-100,
+  "verdict": "SAFE" | "SUSPICIOUS" | "MALICIOUS",
+  "reason_code": 1-5,
+  "confidence": 0.0-1.0,
+  "flags": ["string"],
+  "reasoning": "string"
+}
+
+Scoring guide:
+- SAFE (0-40): System packages (0x1, 0x2, 0xdee9), known protocols (circle.com, cetus.zone), no suspicious patterns
+- SUSPICIOUS (41-64): Unknown packages with minor red flags
+- MALICIOUS (65-100): Phishing URLs, homoglyph domains, honeypot ABI (drain/sweep functions), fake airdrops, digit-substituted domains
+
+Return ONLY a valid JSON array. No markdown, no explanation.
+
+${itemsText}`;
+
+  const MAX_RETRIES = 3;
+  const BASE_DELAY_MS = 8_000;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: batchPrompt }] }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 4096,
+            responseMimeType: "application/json",
+          },
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+
+      if (response.status === 429 || response.status === 503) {
+        const delay = BASE_DELAY_MS * attempt;
+        if (attempt < MAX_RETRIES) {
+          logger.warn({ attempt, status: response.status }, "Gemini throttled (batch) — retrying");
+          await sleep(delay);
+          continue;
+        }
+        logger.warn("Gemini batch persistently throttled — using mock fallback");
+        return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
+      }
+
+      if (!response.ok) {
+        const errText = await response.text();
+        logger.error({ status: response.status, body: errText }, "Gemini batch API error");
+        if (response.status >= 500 && attempt < MAX_RETRIES) {
+          await sleep(BASE_DELAY_MS * attempt);
+          continue;
+        }
+        throw new Error(`Gemini batch API returned ${response.status}`);
+      }
+
+      const data = (await response.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
+        error?: { message?: string };
+      };
+
+      if (data.error?.message) {
+        throw new Error(`Gemini error: ${data.error.message}`);
+      }
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error("Empty batch response from Gemini");
+
+      let parsed: BatchThreatOutput[];
+      try {
+        const clean = text.replace(/```json|```/g, "").trim();
+        parsed = JSON.parse(clean) as BatchThreatOutput[];
+      } catch {
+        logger.warn({ text: text.slice(0, 400), attempt }, "Gemini batch returned non-JSON");
+        if (attempt < MAX_RETRIES) { await sleep(BASE_DELAY_MS * attempt); continue; }
+        throw new Error("Gemini batch response was not valid JSON");
+      }
+
+      // Validate and sanitize each result; fall back per-item to mock if missing
+      return inputs.map((input, i) => {
+        const r = parsed[i];
+        if (!r) return { objectId: input.objectId, ...mockAnalysis(input) };
+        return {
+          objectId: input.objectId,
+          risk_score: Math.max(0, Math.min(100, Math.round(r.risk_score ?? 0))),
+          verdict: validateVerdict(r.verdict),
+          reason_code: Math.max(1, Math.min(5, r.reason_code ?? 5)),
+          confidence: Math.max(0, Math.min(1, r.confidence ?? 0.5)),
+          flags: Array.isArray(r.flags) ? r.flags : [],
+          reasoning: r.reasoning ?? "No reasoning provided",
+        };
+      });
+    } catch (err) {
+      if (attempt === MAX_RETRIES) {
+        logger.warn({ err }, "Gemini batch unavailable after retries — using mock fallback");
+        return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
+      }
+      logger.warn({ err, attempt }, "Gemini batch failed — retrying");
+      await sleep(BASE_DELAY_MS * attempt);
+    }
+  }
+
+  return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
+}
+
 function validateVerdict(v: unknown): "SAFE" | "SUSPICIOUS" | "MALICIOUS" {
   if (v === "SAFE" || v === "SUSPICIOUS" || v === "MALICIOUS") return v;
   return "SUSPICIOUS";

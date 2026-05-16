@@ -2,7 +2,7 @@
 import { Router } from "express";
 import { randomBytes } from "crypto";
 import { prisma } from "@workspace/db";
-import { analyzeThreat } from "../lib/gemini";
+import { analyzeThreatBatch } from "../lib/gemini";
 import { storeThreatLog, buildThreatLog } from "../lib/walrus";
 import { quarantineOnChain, isOnChainEnabled } from "../lib/onchain";
 
@@ -196,16 +196,15 @@ router.post("/populate-wallet", async (req, res) => {
 
   const injections = [...spamInjections, ...legitInjections];
 
+  // Analyze ALL objects in a single Gemini call — no per-item delays, no timeout
+  const verdicts = await analyzeThreatBatch(injections);
+
   const settled = await Promise.allSettled(
-    injections.map(async (obj) => {
-      const verdict = await analyzeThreat({
-        objectId:      obj.objectId,
-        objectType:    obj.objectType,
-        senderAddress: obj.senderAddress,
-        displayName:   obj.displayName,
-        displayUrl:    obj.displayUrl,
-        moveAbi:       obj.moveAbi,
-      });
+    injections.map(async (obj, idx) => {
+      const verdict = verdicts[idx] ?? {
+        risk_score: 20, verdict: "SAFE" as const, reason_code: 5,
+        confidence: 0.5, flags: [], reasoning: "No verdict returned",
+      };
 
       const logPayload = buildThreatLog({
         objectId:      obj.objectId,
@@ -225,7 +224,6 @@ router.post("/populate-wallet", async (req, res) => {
       let onChainDigest: string | null = null;
 
       if (verdict.risk_score >= MIN_RISK_SCORE_FOR_QUARANTINE) {
-        // Store to Walrus and DB in parallel
         const [walrusBlobId, threat] = await Promise.all([
           storeThreatLog(logPayload),
           prisma.threat.create({
@@ -249,10 +247,7 @@ router.post("/populate-wallet", async (req, res) => {
         threatId = threat.id;
 
         if (walrusBlobId) {
-          await prisma.threat.update({
-            where: { id: threatId },
-            data:  { walrusBlobId },
-          });
+          await prisma.threat.update({ where: { id: threatId }, data: { walrusBlobId } });
         }
 
         onChainDigest = await quarantineOnChain({
@@ -263,19 +258,40 @@ router.post("/populate-wallet", async (req, res) => {
           verdict:       verdict.verdict,
           reasonCode:    verdict.reason_code,
           confidence:    verdict.confidence,
-          walrusBlobId:  walrusBlobId ?? "",
+          walrusBlobId:  "",
         });
 
         if (onChainDigest) {
-          await prisma.threat
-            .update({
-              where: { id: threatId },
-              data:  { quarantineTxDigest: onChainDigest },
-            })
-            .catch(() => {}); // non-fatal
+          await prisma.threat.update({
+            where: { id: threatId },
+            data:  { quarantineTxDigest: onChainDigest },
+          }).catch(() => {});
         }
       } else {
-        storeThreatLog(logPayload).catch(() => {});
+        // Save safe/legit objects to DB so they appear in the UI
+        const [walrusBlobId, threat] = await Promise.all([
+          storeThreatLog(logPayload),
+          prisma.threat.create({
+            data: {
+              objectId:      obj.objectId,
+              objectType:    obj.objectType,
+              senderAddress: obj.senderAddress,
+              displayName:   obj.displayName ?? null,
+              displayUrl:    obj.displayUrl  ?? null,
+              riskScore:     verdict.risk_score,
+              verdict:       verdict.verdict,
+              reasonCode:    verdict.reason_code,
+              confidence:    verdict.confidence,
+              flags:         verdict.flags,
+              reasoning:     verdict.reasoning,
+              status:        "safe",
+            },
+          }),
+        ]);
+        threatId = threat.id;
+        if (walrusBlobId) {
+          await prisma.threat.update({ where: { id: threatId }, data: { walrusBlobId } }).catch(() => {});
+        }
       }
 
       return {
@@ -289,15 +305,14 @@ router.post("/populate-wallet", async (req, res) => {
     })
   );
 
-  const threats = settled
-    .filter(
-      (r): r is PromiseFulfilledResult<{
-        objectId: string; objectType: string;
-        verdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS";
-        riskScore: number; threatId: number | null; onChainDigest: string | null;
-      }> => r.status === "fulfilled"
-    )
-    .map((r) => r.value);
+  // Filter fulfilled promises, then cast the array to the fulfilled-result type
+  const fulfilled = settled.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{
+    objectId: string; objectType: string;
+    verdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS";
+    riskScore: number; threatId: number | null; onChainDigest: string | null;
+  }>[];
+
+  const threats = fulfilled.map((r) => r.value);
 
   const quarantined    = threats.filter((t) => t.threatId !== null).length;
   const onChainDigests = threats.map((t) => t.onChainDigest).filter(Boolean);
