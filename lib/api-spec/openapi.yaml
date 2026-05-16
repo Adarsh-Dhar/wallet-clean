@@ -1,0 +1,501 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: DeepClean - Sui blockchain spam & phishing filter agent API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: threats
+    description: Threat detection and quarantine management
+  - name: monitor
+    description: Wallet monitoring
+  - name: stats
+    description: Dashboard statistics
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /threats:
+    get:
+      operationId: listThreats
+      tags: [threats]
+      summary: List all detected threats
+      parameters:
+        - name: verdict
+          in: query
+          schema:
+            type: string
+            enum: [SAFE, SUSPICIOUS, MALICIOUS]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [quarantined, released, burned]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: List of threats
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Threat"
+
+  /threats/analyze:
+    post:
+      operationId: analyzeThreat
+      tags: [threats]
+      summary: Analyze a Sui object for threats using Gemini AI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ThreatAnalysisInput"
+      responses:
+        "200":
+          description: Analysis result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreatAnalysisResult"
+
+  /threats/{id}:
+    get:
+      operationId: getThreat
+      tags: [threats]
+      summary: Get a specific threat by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Threat details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Threat"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /threats/{id}/release:
+    post:
+      operationId: releaseThreat
+      tags: [threats]
+      summary: Release a quarantined asset back to owner
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Released
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Threat"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /threats/{id}/burn:
+    post:
+      operationId: burnThreat
+      tags: [threats]
+      summary: Permanently burn a quarantined malicious asset
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Burned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Threat"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /monitor/wallets:
+    get:
+      operationId: listWatchedWallets
+      tags: [monitor]
+      summary: List all monitored wallets
+      responses:
+        "200":
+          description: List of watched wallets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WatchedWallet"
+    post:
+      operationId: addWatchedWallet
+      tags: [monitor]
+      summary: Add a wallet address to monitor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WatchedWalletInput"
+      responses:
+        "201":
+          description: Wallet added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchedWallet"
+
+  /monitor/wallets/{id}:
+    delete:
+      operationId: removeWatchedWallet
+      tags: [monitor]
+      summary: Remove a wallet from monitoring
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchedWallet"
+
+  /populate-wallet:
+    post:
+      operationId: populateWallet
+      tags: [threats]
+      summary: Seed demo spam objects into a monitored wallet for testing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PopulateWalletBody"
+      responses:
+        "200":
+          description: Population complete — threats analyzed and quarantined
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PopulateWalletResult"
+        "400":
+          description: Bad request
+
+  /stats/dashboard:
+    get:
+      operationId: getDashboardStats
+      tags: [stats]
+      summary: Get dashboard summary statistics
+      responses:
+        "200":
+          description: Dashboard stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+
+  /stats/activity:
+    get:
+      operationId: getRecentActivity
+      tags: [stats]
+      summary: Get recent threat activity feed
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Recent activity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityEvent"
+
+  /stats/risk-breakdown:
+    get:
+      operationId: getRiskBreakdown
+      tags: [stats]
+      summary: Get breakdown of threats by reason code
+      responses:
+        "200":
+          description: Risk breakdown
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RiskBreakdownItem"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    Threat:
+      type: object
+      required: [id, objectId, objectType, senderAddress, riskScore, verdict, reasonCode, confidence, flags, reasoning, status, detectedAt]
+      properties:
+        id:
+          type: integer
+        objectId:
+          type: string
+        objectType:
+          type: string
+        senderAddress:
+          type: string
+        displayName:
+          type: ["string", "null"]
+        displayUrl:
+          type: ["string", "null"]
+        riskScore:
+          type: integer
+        verdict:
+          type: string
+          enum: [SAFE, SUSPICIOUS, MALICIOUS]
+        reasonCode:
+          type: integer
+        confidence:
+          type: number
+        flags:
+          type: array
+          items:
+            type: string
+        reasoning:
+          type: string
+        status:
+          type: string
+          enum: [quarantined, released, burned]
+        walrusBlobId:
+          type: ["string", "null"]
+        quarantineTxDigest:
+          type: ["string", "null"]
+        detectedAt:
+          type: string
+        updatedAt:
+          type: string
+
+    ThreatAnalysisInput:
+      type: object
+      required: [objectId, objectType, senderAddress]
+      properties:
+        objectId:
+          type: string
+        objectType:
+          type: string
+        senderAddress:
+          type: string
+        displayName:
+          type: ["string", "null"]
+        displayUrl:
+          type: ["string", "null"]
+        moveAbi:
+          type: ["string", "null"]
+
+    ThreatAnalysisResult:
+      type: object
+      required: [riskScore, verdict, reasonCode, confidence, flags, reasoning]
+      properties:
+        riskScore:
+          type: integer
+        verdict:
+          type: string
+          enum: [SAFE, SUSPICIOUS, MALICIOUS]
+        reasonCode:
+          type: integer
+        confidence:
+          type: number
+        flags:
+          type: array
+          items:
+            type: string
+        reasoning:
+          type: string
+        savedThreatId:
+          type: ["integer", "null"]
+
+    PopulateWalletBody:
+      type: object
+      required: [targetAddress]
+      properties:
+        targetAddress:
+          type: string
+          description: Sui wallet address to seed with synthetic spam objects
+        txDigest:
+          type: string
+          nullable: true
+          description: Optional real Sui TX digest if the caller already submitted a PTB
+
+    PopulateWalletResult:
+      type: object
+      required: [injected, quarantined, txDigest, threats]
+      properties:
+        injected:
+          type: integer
+          description: Number of objects pushed through analysis
+        quarantined:
+          type: integer
+          description: Number of objects quarantined (risk_score >= 65)
+        txDigest:
+          type: ["string", "null"]
+          description: Real Sui TX digest (null if synthetic-only run)
+        threats:
+          type: array
+          items:
+            type: object
+            required: [objectId, objectType, verdict, riskScore]
+            properties:
+              objectId:
+                type: string
+              objectType:
+                type: string
+              verdict:
+                type: string
+              riskScore:
+                type: integer
+              threatId:
+                type: ["integer", "null"]
+
+    WatchedWallet:
+      type: object
+      required: [id, address, label, isActive, createdAt]
+      properties:
+        id:
+          type: integer
+        address:
+          type: string
+        label:
+          type: string
+        isActive:
+          type: boolean
+        threatsDetected:
+          type: integer
+        createdAt:
+          type: string
+
+    WatchedWalletInput:
+      type: object
+      required: [address, label]
+      properties:
+        address:
+          type: string
+        label:
+          type: string
+
+    DashboardStats:
+      type: object
+      required: [totalThreats, quarantined, burned, released, maliciousCount, suspiciousCount, safeCount, walletsMonitored, avgRiskScore]
+      properties:
+        totalThreats:
+          type: integer
+        quarantined:
+          type: integer
+        burned:
+          type: integer
+        released:
+          type: integer
+        maliciousCount:
+          type: integer
+        suspiciousCount:
+          type: integer
+        safeCount:
+          type: integer
+        walletsMonitored:
+          type: integer
+        avgRiskScore:
+          type: number
+
+    ActivityEvent:
+      type: object
+      required: [id, type, objectId, verdict, riskScore, timestamp]
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum: [detected, quarantined, released, burned]
+        objectId:
+          type: string
+        objectType:
+          type: string
+        verdict:
+          type: string
+        riskScore:
+          type: integer
+        timestamp:
+          type: string
+
+    RiskBreakdownItem:
+      type: object
+      required: [reasonCode, label, count]
+      properties:
+        reasonCode:
+          type: integer
+        label:
+          type: string
+        count:
+          type: integer

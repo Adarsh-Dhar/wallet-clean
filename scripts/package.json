@@ -1,0 +1,22 @@
+{
+  "name": "@workspace/scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "hello": "tsx ./src/hello.ts",
+    "test:ai": "tsx ./src/test-ai.ts",
+    "test:e2e": "tsx ./src/test-e2e.ts",
+    "test:monitor": "tsx ./src/test-monitor.ts",
+    "test:all": "pnpm run test:monitor && pnpm run test:ai && pnpm run test:e2e",
+    "populate": "tsx ./src/populate-wallet.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@mysten/sui": "^2.16.2"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "catalog:"
+  }
+}

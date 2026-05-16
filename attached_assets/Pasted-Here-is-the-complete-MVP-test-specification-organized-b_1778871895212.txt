@@ -1,0 +1,13 @@
+Here is the complete MVP test specification, organized by system layer. Think of this as your "definition of done" — the project is not submittable until every test below passes.Click any test row to mark it as passing as you build. Here's what each suite is guarding against and what tooling to use:
+
+**T1 — Monitoring layer** tests are best run with a simple devnet script that self-sends a test coin every 30 seconds. Use `@mysten/sui/client` in a throwaway `test-monitor.ts`. The reconnect test can be simulated by calling `unsubscribe()` and then re-entering `startMonitor()`.
+
+**T2 — AI engine** is the layer most likely to surprise you. Build a standalone `test-ai.ts` with 5–10 hardcoded fixture objects (a known honeypot ABI, a known safe token, a spoofed display URL, etc.) and run the analysis function against all of them in one shot. The latency test matters for the demo — judges won't want to wait 20+ seconds watching a spinner.
+
+**T3 — Move contract** tests map almost exactly to Sui's Move test framework. You can write the unauthorized-call test as a `#[test] #[expected_failure]` block directly in Move. The PTB atomicity test should be a TypeScript integration test against testnet — simulate a scenario where the blob write succeeds but you pass a deliberately bad quarantine call; verify the asset didn't move.
+
+**T4 — Walrus** tests are the ones easiest to defer and most likely to bite you at submission time. The "on-chain blobId matches stored blob" test is specifically critical for the Walrus track judges — it is the proof that your verifiable memory layer is actually linked to on-chain state, not just a side-channel log.
+
+**T5 — E2E** is your demo script. Run it the day before submission. The 30-second SLA on the full pipeline is a realistic expectation for judges watching a live demo. If you're over that, look at parallelizing the Walrus write and the AI call (they're independent and can fire simultaneously once you have the object metadata).
+
+**T6 — Frontend** should be the last suite you close out. The site deploy and the burn/restore PTBs are the two riskiest items — Walrus Sites CLI has its own gotchas around build output paths, and PTB construction from a browser wallet (e.g. via `@mysten/dapp-kit`) requires a connected signer that behaves differently from your agent's keypair. Give these at least two full days.

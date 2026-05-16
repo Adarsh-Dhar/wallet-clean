@@ -1,0 +1,381 @@
+This is a genuinely ambitious project. Here's the full technical architecture document.
+
+---
+
+# DeepClean: Spam & Phishing Filter Agent — Technical Architecture
+
+## System Architecture Overview---
+
+## 1. Sui Move Smart Contract Design
+
+### Quarantine Vault Module
+
+The vault's core design uses Sui's **object ownership model** to lock assets without destroying them, preserving the burn/restore capability.
+
+```move
+module deepclean::quarantine_vault {
+    use sui::object::{Self, UID};
+    use sui::transfer;
+    use sui::tx_context::{Self, TxContext};
+    use sui::table::{Self, Table};
+    use sui::event;
+    use std::string::String;
+
+    // ── Capability objects ──────────────────────────────────────────
+    /// Owned by the deploying agent address. Required to quarantine or release.
+    struct AgentCap has key, store { id: UID }
+
+    // ── Core vault state (shared object) ───────────────────────────
+    struct QuarantineVault has key {
+        id: UID,
+        owner: address,
+        /// Maps quarantined object ID → threat metadata
+        registry: Table<ID, ThreatRecord>,
+    }
+
+    struct ThreatRecord has store, drop {
+        walrus_blob_id: String,   // verifiable threat log ID
+        risk_score: u8,           // 0–100 from AI model
+        reason_code: u8,          // 1=honeypot, 2=phishing, 3=spoofed, 4=spam
+        quarantined_at: u64,      // epoch timestamp
+    }
+
+    // ── Events ─────────────────────────────────────────────────────
+    struct AssetQuarantined has copy, drop {
+        object_id: ID,
+        risk_score: u8,
+        walrus_blob_id: String,
+    }
+    struct AssetReleased  has copy, drop { object_id: ID, to: address }
+    struct AssetBurned    has copy, drop { object_id: ID }
+
+    // ── Init ───────────────────────────────────────────────────────
+    fun init(ctx: &mut TxContext) {
+        let vault = QuarantineVault {
+            id: object::new(ctx),
+            owner: tx_context::sender(ctx),
+            registry: table::new(ctx),
+        };
+        transfer::share_object(vault);
+        transfer::transfer(AgentCap { id: object::new(ctx) }, tx_context::sender(ctx));
+    }
+
+    // ── Quarantine: receives a generic asset, locks it in vault ────
+    public fun quarantine<T: key + store>(
+        vault: &mut QuarantineVault,
+        _cap: &AgentCap,
+        asset: T,
+        blob_id: String,
+        risk_score: u8,
+        reason_code: u8,
+        ctx: &mut TxContext,
+    ) {
+        let oid = object::id(&asset);
+        table::add(&mut vault.registry, oid, ThreatRecord {
+            walrus_blob_id: blob_id,
+            risk_score,
+            reason_code,
+            quarantined_at: tx_context::epoch(ctx),
+        });
+        // Transfer asset ownership to the vault object itself
+        transfer::public_transfer(asset, object::uid_to_address(&vault.id));
+        event::emit(AssetQuarantined { object_id: oid, risk_score, walrus_blob_id: blob_id });
+    }
+
+    // ── Restore: agent + user co-sign to return asset ──────────────
+    public fun restore<T: key + store>(
+        vault: &mut QuarantineVault,
+        _cap: &AgentCap,
+        asset: T,
+        recipient: address,
+        ctx: &mut TxContext,
+    ) {
+        let oid = object::id(&asset);
+        table::remove(&mut vault.registry, oid);
+        transfer::public_transfer(asset, recipient);
+        event::emit(AssetReleased { object_id: oid, to: recipient });
+    }
+
+    // ── Burn: permanently destroy the quarantined token ────────────
+    // Requires T to have the `drop` ability (works for most spam tokens)
+    public fun burn_droppable<T: key + store + drop>(
+        vault: &mut QuarantineVault,
+        _cap: &AgentCap,
+        asset: T,
+        _ctx: &mut TxContext,
+    ) {
+        let oid = object::id(&asset);
+        table::remove(&mut vault.registry, oid);
+        // asset is dropped here by Move runtime
+        event::emit(AssetBurned { object_id: oid });
+    }
+}
+```
+
+**Key design decisions:**
+
+- `AgentCap` uses the capability pattern — only the agent's wallet can invoke quarantine/restore. No admin multisig needed for MVP, but you can extend this to require a user signature for restore.
+- The vault is a **shared object** so the dashboard frontend can read its `registry` table without the agent being online.
+- `ThreatRecord` stores the `walrus_blob_id` on-chain, creating a cryptographic link between the on-chain action and the off-chain AI log.
+- The `quarantine<T: key + store>` generic lets you handle **any** Sui object type — tokens, NFTs, arbitrary assets — with one contract.
+
+---
+
+## 2. AI & Integration Stack
+
+### Parsing Pipeline
+
+```
+Incoming TransferObject event
+        │
+        ▼
+┌─────────────────────────────────────────────────────┐
+│  Metadata Harvester (TypeScript)                    │
+│  sui.getObject(objectId, { showContent: true,       │
+│                            showType: true,           │
+│                            showDisplay: true })      │
+│                                                     │
+│  sui.getNormalizedMoveModule(packageId, moduleName) │
+│  → extracts function signatures, abilities, fields  │
+└───────────────────┬─────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────┐
+│  Context Builder  (builds the AI prompt payload)    │
+│                                                     │
+│  {                                                  │
+│    object_type, display_metadata, url_fields,       │
+│    move_module_abi, function_list,                  │
+│    known_scam_signatures (from Walrus registry),    │
+│    sender_address, receiving_wallet                 │
+│  }                                                  │
+└───────────────────┬─────────────────────────────────┘
+                    │
+                    ▼
+         LLM Threat Analysis Prompt
+```
+
+### Recommended LLM Stack
+
+| Component | Recommendation | Rationale |
+|---|---|---|
+| Primary model | **Claude claude-sonnet-4-20250514** via API | Strong code/ABI reasoning, structured JSON output |
+| Fallback | **GPT-4o** | Redundancy for availability |
+| Embedding model | **text-embedding-3-small** (OpenAI) | For similarity search against scam signature registry |
+| Runtime | Node.js agent process | Matches Mysten Labs TS SDK environment |
+
+### Threat Analysis Prompt Template
+
+```typescript
+const systemPrompt = `You are a blockchain security analyst specializing in Sui Move smart contracts. 
+Analyze the provided asset metadata and Move module ABI for malicious patterns.
+
+Return ONLY valid JSON with this exact schema:
+{
+  "risk_score": <0-100>,
+  "verdict": "SAFE" | "SUSPICIOUS" | "MALICIOUS",
+  "reason_code": <1=honeypot|2=phishing|3=spoofed_address|4=spam|5=unknown>,
+  "confidence": <0.0-1.0>,
+  "flags": ["<specific finding>"],
+  "reasoning": "<2-3 sentence plain English explanation>"
+}`;
+
+const userPrompt = `
+## Asset to analyze
+- Object type: ${objectType}
+- Sender address: ${senderAddress}
+- Display name: ${display?.name}
+- Display URL: ${display?.link}
+
+## Move module ABI (normalized)
+${JSON.stringify(moveABI, null, 2)}
+
+## Known scam signatures (from registry)
+${JSON.stringify(knownSignatures)}
+
+Check for: withdraw_all / drain functions hidden behind misleading names, 
+URLs containing lookalike domains, metadata spoofing known projects, 
+objects with no legitimate utility, honeypot transfer restrictions.
+`;
+```
+
+### Honeypot Detection Heuristics (feed to LLM as few-shot examples)
+
+- Functions named `claim`, `mint_free`, `airdrop` that internally call `coin::transfer` FROM the caller's balance
+- Move objects with `store` ability but missing `transfer` — can't be moved out once accepted
+- Display URLs using Unicode homoglyphs (е vs e, etc.)
+- Package IDs deployed < 24 hours ago with > 100 transfers
+- Module names that differ from the package name by 1-2 characters
+
+---
+
+## 3. Monitoring Layer — TypeScript Agent
+
+```typescript
+import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Transaction } from '@mysten/sui/transactions';
+
+const client = new SuiClient({ url: getFullnodeUrl('mainnet') });
+
+// Subscribe to transfer events targeting the watched wallet
+async function startMonitor(watchedAddress: string) {
+    // Poll-based fallback (WebSocket subscriptions available on supported RPCs)
+    const unsubscribe = await client.subscribeEvent({
+        filter: {
+            MoveEventType: '0x2::transfer::TransferEvent',
+        },
+        onMessage: async (event) => {
+            const { recipient, objectId } = event.parsedJson as any;
+            if (recipient !== watchedAddress) return;
+
+            const object = await client.getObject({
+                id: objectId,
+                options: { showContent: true, showType: true, showDisplay: true }
+            });
+
+            await analyzeAndQuarantine(object, watchedAddress);
+        }
+    });
+}
+
+async function analyzeAndQuarantine(object: any, walletAddress: string) {
+    // 1. Extract Move module for AI analysis
+    const [packageId, moduleName] = object.data?.type?.split('::') ?? [];
+    const moveModule = await client.getNormalizedMoveModule({ package: packageId, module: moduleName });
+
+    // 2. Fetch scam signatures from Walrus registry
+    const knownSigs = await fetchWalrusRegistry();
+
+    // 3. Call AI
+    const verdict = await callThreatAnalysisAI(object, moveModule, knownSigs);
+
+    if (verdict.risk_score >= 65) {
+        // 4. Write log to Walrus, get blob ID
+        const blobId = await writeToWalrus({
+            objectId: object.data?.objectId,
+            verdict,
+            timestamp: Date.now(),
+            moveABI: moveModule,
+        });
+
+        // 5. Execute PTB to quarantine
+        await executeQuarantine(object, verdict, blobId, walletAddress);
+    }
+}
+```
+
+---
+
+## 4. Walrus Integration — MemWal Structure
+
+### Blob Schema
+
+Each threat analysis event produces one Walrus blob with this structure:
+
+```typescript
+interface ThreatLog {
+    // Identity
+    schema_version: "1.0";
+    agent_version: string;
+    
+    // Asset info
+    sui_object_id: string;
+    object_type: string;
+    sender_address: string;
+    detected_at_epoch: number;
+    detected_at_timestamp: number;
+    
+    // AI verdict
+    risk_score: number;            // 0-100
+    verdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS";
+    reason_code: number;
+    confidence: number;
+    flags: string[];
+    ai_reasoning: string;
+    ai_model_used: string;
+    
+    // Evidence
+    raw_move_abi_hash: string;     // SHA-256 of the ABI sent to AI
+    display_metadata_snapshot: object;
+    
+    // Cross-references
+    quarantine_vault_address: string;
+    quarantine_tx_digest?: string;  // populated after PTB executes
+    
+    // Scam signature
+    signature_hash: string;        // for dedup / registry matching
+}
+```
+
+### Writing to Walrus
+
+```typescript
+import { WalrusClient } from '@mysten/walrus';  // or REST API
+
+async function writeToWalrus(log: ThreatLog): Promise<string> {
+    const walrus = new WalrusClient({ network: 'mainnet' });
+    
+    const blob = new TextEncoder().encode(JSON.stringify(log));
+    
+    const { blobId } = await walrus.writeBlob({
+        blob,
+        deletable: false,         // immutable — tamper-proof
+        epochs: 52,               // ~1 year retention
+    });
+    
+    return blobId;
+}
+
+// Scam signature registry: a single mutable blob updated periodically
+async function updateSignatureRegistry(newSig: string, registryBlobId: string) {
+    // Fetch current registry
+    const current = await walrus.readBlob({ blobId: registryBlobId });
+    const registry = JSON.parse(new TextDecoder().decode(current));
+    
+    registry.signatures.push({
+        hash: newSig,
+        first_seen: Date.now(),
+        occurrences: 1,
+    });
+    
+    // Write updated registry as new blob; update on-chain pointer
+    const { blobId: newRegistryId } = await walrus.writeBlob({
+        blob: new TextEncoder().encode(JSON.stringify(registry)),
+        deletable: true,  // registry is mutable; old version replaced
+        epochs: 52,
+    });
+    
+    return newRegistryId;
+}
+```
+
+### Retrieving for Frontend
+
+```typescript
+// Frontend: fetch threat log by blob ID stored in vault's ThreatRecord
+async function fetchThreatLog(blobId: string): Promise<ThreatLog> {
+    const resp = await fetch(`https://aggregator.walrus-mainnet.walrus.space/v1/${blobId}`);
+    return resp.json();
+}
+```
+
+The `blobId` is stored **on-chain** in the `QuarantineVault.registry` table, so the frontend never needs a separate database — it reads the vault's shared object, gets the `walrus_blob_id`, then fetches the full log from Walrus.
+
+---
+
+## 5. Phased Hackathon Timeline---
+
+## Critical Implementation Notes
+
+**On the `AgentCap` custody problem:** The agent needs to sign PTBs autonomously, which means holding a private key in the process. For the hackathon, store it in an environment variable. For production, this would move to a TEE (Trusted Execution Environment) or MPC wallet setup.
+
+**On Sui event subscriptions:** The Mysten Labs SDK's `subscribeEvent` uses WebSocket connections that can drop. Build a reconnect loop with exponential backoff and a polling fallback using `queryEvents` with a cursor stored in state — don't rely solely on the WebSocket.
+
+**On false positives:** Your AI will flag legitimate airdrops. Build the restore flow before you build burn — you want users to be able to recover assets. Set the default quarantine threshold at `risk_score >= 75` initially, then tune it down based on testing.
+
+**On Walrus blob costs:** Each `writeBlob` call costs WAL tokens (Walrus' native token). Budget for this in your testnet setup. The `deletable: false` flag on threat logs is important for the Walrus track — immutability is what makes the log verifiable.
+
+**Track alignment summary:**
+- **Agentic Web track:** The autonomous agent loop (monitor → analyze → execute PTB without user intervention) is your core narrative here. Emphasize the agent's decision autonomy.
+- **Walrus track:** The tamper-proof threat registry and the on-chain ↔ off-chain blob ID linkage via `ThreatRecord.walrus_blob_id` is your core narrative here. Emphasize verifiability and the public scam registry as a community good.

@@ -1,0 +1,77 @@
+Good question. There are three layers to verify — the transaction went through, the objects landed in the wallet, and your monitoring layer actually detected them.
+
+---
+
+**Layer 1: Confirm the transaction executed**
+
+After your PTB fires, you get back a transaction digest. Paste it into the Sui Devnet explorer:
+
+```
+https://suiscan.xyz/devnet/tx/<YOUR_TX_DIGEST>
+```
+
+You're looking for:
+- Status: **Success** (not failed)
+- Under "Object Changes" → you should see N objects created and transferred to your target address
+- If it failed, the error message here tells you exactly why (usually insufficient gas or a wrong package ID)
+
+---
+
+**Layer 2: Confirm objects are in the wallet**
+
+Run this in your terminal using the Sui CLI:
+
+```bash
+sui client objects <TARGET_WALLET_ADDRESS> --json
+```
+
+Or query via the TypeScript SDK in a quick test script:
+
+```typescript
+import { SuiClient } from '@mysten/sui.js/client';
+
+const client = new SuiClient({ url: 'https://fullnode.devnet.sui.io' });
+
+const objects = await client.getOwnedObjects({
+  owner: '<TARGET_WALLET_ADDRESS>',
+  options: { showType: true, showContent: true, showDisplay: true }
+});
+
+console.log(JSON.stringify(objects.data, null, 2));
+```
+
+You're looking for your three custom types in the results — e.g. `<PACKAGE_ID>::scam_nft::ScamNFT`. If they're there, the population script worked perfectly.
+
+---
+
+**Layer 3: Confirm your monitoring layer fired**
+
+This is the most important test. Add a `console.log` inside your event listener before you integrate the AI engine, so you can see raw events hitting:
+
+```typescript
+suiClient.subscribeEvent({
+  filter: { ToAddress: USER_WALLET_ADDRESS },
+  onMessage: (event) => {
+    console.log('🚨 Incoming object detected:', JSON.stringify(event, null, 2));
+  }
+});
+```
+
+Run this listener in one terminal, then trigger your populate button. You should see the event log fire within 1–3 seconds of the transaction confirming.
+
+---
+
+**Quick sanity checklist:**
+
+| Check | Tool | Expected result |
+|---|---|---|
+| Tx succeeded | Suiscan Devnet explorer | Status: Success |
+| Objects in wallet | `sui client objects` or SDK | Your 3 custom types present |
+| Event fired | Console log in listener | Event logged with correct `ToAddress` |
+| Object count | Compare before/after | `objects.data.length` increased by 5 |
+
+---
+
+The most common failure points are: wrong network (mainnet vs devnet mismatch), the spammer keypair running out of gas, or the package ID in your PTB not matching what was actually published. The explorer will tell you which one it is immediately.
+
+Want me to write a single **test script** that runs all three checks automatically and prints a pass/fail report?
