@@ -136,7 +136,12 @@ router.post("/threats/analyze", async (req, res) => {
 
 // GET /threats/:id
 router.get("/threats/:id", async (req, res) => {
-  const params = GetThreatParams.safeParse({ id: Number(req.params["id"]) });
+  const rawId = Number(req.params["id"]);
+  if (!Number.isFinite(rawId) || !Number.isInteger(rawId) || rawId < 1 || rawId > 2147483647) {
+    res.status(400).json({ error: "Invalid id" });
+    return;
+  }
+  const params = GetThreatParams.safeParse({ id: rawId });
   if (!params.success) {
     res.status(400).json({ error: "Invalid id" });
     return;
@@ -160,7 +165,12 @@ router.get("/threats/:id", async (req, res) => {
 
 // POST /threats/:id/release
 router.post("/threats/:id/release", async (req, res) => {
-  const params = ReleaseThreatParams.safeParse({ id: Number(req.params["id"]) });
+  const rawId = Number(req.params["id"]);
+  if (!Number.isFinite(rawId) || !Number.isInteger(rawId) || rawId < 1 || rawId > 2147483647) {
+    res.status(400).json({ error: "Invalid id" });
+    return;
+  }
+  const params = ReleaseThreatParams.safeParse({ id: rawId });
   if (!params.success) {
     res.status(400).json({ error: "Invalid id" });
     return;
@@ -190,7 +200,12 @@ router.post("/threats/:id/release", async (req, res) => {
 
 // POST /threats/:id/burn
 router.post("/threats/:id/burn", async (req, res) => {
-  const params = BurnThreatParams.safeParse({ id: Number(req.params["id"]) });
+  const rawId = Number(req.params["id"]);
+  if (!Number.isFinite(rawId) || !Number.isInteger(rawId) || rawId < 1 || rawId > 2147483647) {
+    res.status(400).json({ error: "Invalid id" });
+    return;
+  }
+  const params = BurnThreatParams.safeParse({ id: rawId });
   if (!params.success) {
     res.status(400).json({ error: "Invalid id" });
     return;

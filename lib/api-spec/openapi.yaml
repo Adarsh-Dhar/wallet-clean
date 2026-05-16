@@ -95,6 +95,8 @@ paths:
           required: true
           schema:
             type: integer
+            minimum: 1
+            maximum: 2147483647
       responses:
         "200":
           description: Threat details
@@ -120,6 +122,8 @@ paths:
           required: true
           schema:
             type: integer
+            minimum: 1
+            maximum: 2147483647
       responses:
         "200":
           description: Released
@@ -145,6 +149,8 @@ paths:
           required: true
           schema:
             type: integer
+            minimum: 1
+            maximum: 2147483647
       responses:
         "200":
           description: Burned
@@ -202,6 +208,8 @@ paths:
           required: true
           schema:
             type: integer
+            minimum: 1
+            maximum: 2147483647
       responses:
         "200":
           description: Removed

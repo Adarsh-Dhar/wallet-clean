@@ -43,7 +43,12 @@ router.post("/monitor/wallets", async (req, res) => {
 
 // DELETE /monitor/wallets/:id
 router.delete("/monitor/wallets/:id", async (req, res) => {
-  const params = RemoveWatchedWalletParams.safeParse({ id: Number(req.params["id"]) });
+  const rawId = Number(req.params["id"]);
+  if (!Number.isFinite(rawId) || !Number.isInteger(rawId) || rawId < 1 || rawId > 2147483647) {
+    res.status(400).json({ error: "Invalid id" });
+    return;
+  }
+  const params = RemoveWatchedWalletParams.safeParse({ id: rawId });
   if (!params.success) {
     res.status(400).json({ error: "Invalid id" });
     return;
