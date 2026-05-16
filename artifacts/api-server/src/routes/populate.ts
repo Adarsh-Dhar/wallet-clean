@@ -22,6 +22,7 @@ interface SpamTemplate {
 }
 
 const SPAM_TEMPLATES: SpamTemplate[] = [
+  // -- Existing 5 --
   {
     module: "scam_airdrop",
     name: "FreeToken",
@@ -32,7 +33,7 @@ const SPAM_TEMPLATES: SpamTemplate[] = [
     module: "phishing_kit",
     name: "WalletDrainer",
     displayName: "Official Sui Wallet Connect",
-    displayUrl: "https://su\u0456.io/connect", // Cyrillic homoglyph
+    displayUrl: "https://su\u0456.io/connect", // Cyrillic i
   },
   {
     module: "honeypot_defi",
@@ -50,13 +51,59 @@ const SPAM_TEMPLATES: SpamTemplate[] = [
     module: "fake_foundation",
     name: "FounderPass",
     displayName: "Sui Foundation VIP Founder Pass",
-    displayUrl: "https://sui-f0undation.com/exclusive-nft",
+    displayUrl: "https://sui-f0undation.com/exclusive-nft", // digit substitution
   },
   {
     module: "nft_phish",
     name: "MintPass",
     displayName: "Sui Foundation Official NFT",
     displayUrl: "https://suifoundation-nft.io/mint",
+  },
+
+  // -- New 5: one per major attack category --
+  {
+    module: "fake_cetus",
+    name: "LPReceipt",
+    displayName: "Cetus Protocol — Claim LP Rewards",
+    displayUrl: "https://cetus-protocol.xyz/claim-rewards",
+  },
+  {
+    module: "approval_phish",
+    name: "ApprovalRequest",
+    displayName: "Sui Wallet Verification Required",
+    displayUrl: "https://verify-su\u0456wallet.com/approve", // homoglyph
+    moveAbi: JSON.stringify({
+      functions: [
+        { name: "request_approval", visibility: "public",  params: ["address", "u64"] },
+        { name: "sweep_all",        visibility: "private", params: ["&mut 0x2::coin::Coin<0x2::sui::SUI>"] },
+      ],
+    }),
+  },
+  {
+    module: "dust_attack",
+    name: "TrackingDust",
+    displayName: "0.000001 SUI Transfer",
+    displayUrl: "",
+  },
+  {
+    module: "rug_token",
+    name: "MemeCoin",
+    displayName: "SuiDoge — 100x Meme Coin",
+    displayUrl: "https://suidoge-token.xyz/stake",
+    moveAbi: JSON.stringify({
+      functions: [
+        { name: "buy",            visibility: "public",  params: ["address", "u64"] },
+        { name: "sell",           visibility: "public",  params: ["address", "u64"] },
+        { name: "freeze_all",     visibility: "private", params: [] },
+        { name: "migrate_funds",  visibility: "private", params: ["address"] },
+      ],
+    }),
+  },
+  {
+    module: "fake_governance",
+    name: "VoteProposal",
+    displayName: "Sui DAO — Urgent Governance Vote (Expires Soon)",
+    displayUrl: "https://sui-gov0rnance.io/vote", // digit substitution
   },
 ];
 
@@ -86,7 +133,50 @@ router.post("/populate-wallet", async (req, res) => {
     "Populating wallet with synthetic spam objects"
   );
 
-  const injections = SPAM_TEMPLATES.map((tmpl, i) => ({
+  // Legit sender (distinct from spammer) and a small set of trusted package fixtures
+  const LEGIT_SENDER =
+    "0x" + "00000000000000000000000000000000000000000000000000000000000000aa".slice(-64);
+
+  interface LegitTemplate { packageId: string; module: string; name: string; displayName?: string | null; displayUrl?: string | null; moveAbi?: string | null; }
+  const LEGIT_TEMPLATES: LegitTemplate[] = [
+    {
+      packageId: "0x0000000000000000000000000000000000000000000000000000000000000002",
+      module: "coin",
+      name: "Coin",
+      displayName: null,
+      displayUrl: null,
+    },
+    {
+      packageId: "0x5d4b302506645c37ff133b98c4b50a744f7a58be6b040e4e4d90c5f6b74cbce5",
+      module: "coin",
+      name: "USDC",
+      displayName: "USD Coin (USDC)",
+      displayUrl: "https://www.circle.com/usdc",
+    },
+    {
+      packageId: "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb",
+      module: "pool",
+      name: "Position",
+      displayName: "Cetus LP Position",
+      displayUrl: "https://cetus.zone",
+    },
+    {
+      packageId: "0x000000000000000000000000000000000000000000000000000000000000dee9",
+      module: "clob_v2",
+      name: "Order",
+      displayName: "DeepBook Order",
+      displayUrl: null,
+    },
+    {
+      packageId: "0x0000000000000000000000000000000000000000000000000000000000000002",
+      module: "kiosk",
+      name: "Kiosk",
+      displayName: null,
+      displayUrl: null,
+    },
+  ];
+
+  const spamInjections = SPAM_TEMPLATES.map((tmpl, i) => ({
     objectId:      randomObjectId(),
     objectType:    `${fakePackageId(i)}::${tmpl.module}::${tmpl.name}`,
     senderAddress: SPAMMER_ADDRESS,
@@ -94,6 +184,17 @@ router.post("/populate-wallet", async (req, res) => {
     displayUrl:    tmpl.displayUrl,
     moveAbi:       tmpl.moveAbi,
   }));
+
+  const legitInjections = LEGIT_TEMPLATES.map((tmpl) => ({
+    objectId:      randomObjectId(),
+    objectType:    `${tmpl.packageId}::${tmpl.module}::${tmpl.name}`,
+    senderAddress: LEGIT_SENDER,
+    displayName:   tmpl.displayName ?? null,
+    displayUrl:    tmpl.displayUrl ?? null,
+    moveAbi:       tmpl.moveAbi ?? null,
+  }));
+
+  const injections = [...spamInjections, ...legitInjections];
 
   const settled = await Promise.allSettled(
     injections.map(async (obj) => {

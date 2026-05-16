@@ -8,7 +8,7 @@ import {
   ReleaseThreatParams,
   BurnThreatParams,
 } from "@workspace/api-zod";
-import { analyzeThreat } from "../lib/gemini";
+import { analyzeThreat, extractStaticSignals } from "../lib/gemini";
 import { storeThreatLog, buildThreatLog } from "../lib/walrus";
 
 const router = Router();
@@ -54,6 +54,9 @@ router.post("/threats/analyze", async (req, res) => {
   const startMs = Date.now();
 
   try {
+    const staticSignals = extractStaticSignals(input);
+    req.log.info({ staticSignals }, "Static pre-filter signals");
+
     const verdict = await analyzeThreat({
       objectId:      input.objectId,
       objectType:    input.objectType,
@@ -127,6 +130,7 @@ router.post("/threats/analyze", async (req, res) => {
       reasoning:    verdict.reasoning,
       savedThreatId,
       latencyMs,
+      staticSignals,
     });
   } catch (err) {
     req.log.error({ err }, "Threat analysis failed");

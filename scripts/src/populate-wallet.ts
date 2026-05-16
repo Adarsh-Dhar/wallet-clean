@@ -1,276 +1,416 @@
 #!/usr/bin/env tsx
-/**
- * populate-wallet — DeepClean demo population script
- *
- * Sends 5 synthetic spam/phishing objects through the DeepClean analysis
- * pipeline and optionally fires a real Sui Devnet PTB to prove on-chain
- * connectivity.
- *
- * Usage:
- *   pnpm --filter @workspace/scripts run populate --address 0x<your_wallet>
- *   pnpm --filter @workspace/scripts run populate --address 0x<wallet> --devnet
- *
- * Flags:
- *   --address <addr>   Target wallet address (required)
- *   --devnet           Also submit a real coin-split PTB on Sui Devnet (optional)
- *   --api <url>        Override API base URL (default: http://localhost:80/api)
- */
 
-import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-// @ts-ignore: package exposes runtime `SuiClient` but types may differ by version
-import { SuiClient } from "@mysten/sui/client";
-import { Transaction } from "@mysten/sui/transactions";
+type Verdict = "SAFE" | "SUSPICIOUS" | "MALICIOUS";
 
-// ─── Config ───────────────────────────────────────────────────────────────────
+interface AnalyzeInput {
+  objectId: string;
+  objectType: string;
+  senderAddress: string;
+  displayName?: string | null;
+  displayUrl?: string | null;
+  moveAbi?: string | null;
+}
+
+interface AnalyzeResponse {
+  riskScore: number;
+  verdict: Verdict;
+  reasonCode: number;
+  confidence: number;
+  flags: string[];
+  reasoning: string;
+  latencyMs?: number;
+}
+
+interface Fixture {
+  label: string;
+  input: AnalyzeInput;
+  expectedVerdicts: Verdict[];
+  minRiskScore?: number;
+  maxRiskScore?: number;
+}
 
 const args = process.argv.slice(2);
+
 function getArg(flag: string): string | undefined {
   const idx = args.indexOf(flag);
   return idx !== -1 ? args[idx + 1] : undefined;
 }
-const hasFlag = (f: string) => args.includes(f);
+
+function hasFlag(flag: string): boolean {
+  return args.includes(flag);
+}
 
 const TARGET_ADDRESS = getArg("--address");
-const USE_DEVNET    = hasFlag("--devnet");
-const API_BASE      = getArg("--api") ?? "http://localhost:80/api";
+const API_BASE = getArg("--api") ?? "http://localhost:80/api";
+const SPAM_ONLY = hasFlag("--spam-only");
+const LEGIT_ONLY = hasFlag("--legit-only");
 
-const DEVNET_RPC     = "https://fullnode.devnet.sui.io";
-const DEVNET_FAUCET  = "https://faucet.devnet.sui.io/v1/gas";
-const TIMEOUT_MS     = 90_000;
-
-// ─── Colour helpers ────────────────────────────────────────────────────────────
+const TIMEOUT_MS = 60_000;
 
 const C = {
-  reset:  "\x1b[0m",
-  cyan:   "\x1b[96m",
-  green:  "\x1b[92m",
-  red:    "\x1b[91m",
+  reset: "\x1b[0m",
+  cyan: "\x1b[96m",
+  green: "\x1b[92m",
+  red: "\x1b[91m",
   yellow: "\x1b[93m",
-  dim:    "\x1b[2m",
-  bold:   "\x1b[1m",
+  dim: "\x1b[2m",
+  bold: "\x1b[1m",
 };
-const ok  = (s: string) => `${C.green}✅  ${s}${C.reset}`;
-const err = (s: string) => `${C.red}❌  ${s}${C.reset}`;
-const dim = (s: string) => `${C.dim}${s}${C.reset}`;
-const hdr = (s: string) => `\n${C.bold}${C.cyan}${s}${C.reset}`;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+function colorVerdict(v: Verdict): string {
+  if (v === "SAFE") return `${C.green}${v}${C.reset}`;
+  if (v === "SUSPICIOUS") return `${C.yellow}${v}${C.reset}`;
+  return `${C.red}${v}${C.reset}`;
+}
 
-async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
+function usage(): void {
+  console.log("Usage:");
+  console.log("  pnpm --filter @workspace/scripts run populate --address 0x<your_wallet>");
+  console.log("  pnpm --filter @workspace/scripts run populate --address 0x<your_wallet> --spam-only");
+  console.log("  pnpm --filter @workspace/scripts run populate --address 0x<your_wallet> --legit-only");
+  console.log("Optional:");
+  console.log("  --api http://localhost:8000/api");
+}
+
+function normalizeAddress(a: string): string {
+  return a.startsWith("0x") ? a.toLowerCase() : `0x${a.toLowerCase()}`;
+}
+
+const TARGET = TARGET_ADDRESS ? normalizeAddress(TARGET_ADDRESS) : "0x0";
+
+const SPAM_FIXTURES: Fixture[] = [
+  {
+    label: "Fake SUI airdrop",
+    input: {
+      objectId: "0xspam0001",
+      objectType: "0xdead0001::scam_airdrop::FreeToken",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000001",
+      displayName: "FREE 5000 SUI - Exclusive Airdrop",
+      displayUrl: "https://free-sui-tokens.xyz/airdrop/claim",
+    },
+    expectedVerdicts: ["MALICIOUS"],
+    minRiskScore: 65,
+  },
+  {
+    label: "Cyrillic homoglyph phishing URL",
+    input: {
+      objectId: "0xspam0002",
+      objectType: "0xdead0002::phishing_kit::WalletDrainer",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000002",
+      displayName: "Official Sui Wallet Connect",
+      displayUrl: "https://su\u0456.io/connect",
+    },
+    expectedVerdicts: ["MALICIOUS"],
+    minRiskScore: 65,
+  },
+  {
+    label: "Honeypot DeFi with _drain_all ABI",
+    input: {
+      objectId: "0xspam0003",
+      objectType: "0xdead0003::honeypot_defi::HoneypotToken",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000003",
+      displayName: "SuiGold - 10x APY DeFi Protocol",
+      displayUrl: "https://suigold-defi.xyz/stake",
+      moveAbi: JSON.stringify({
+        functions: [
+          { name: "_drain_all", visibility: "private", params: ["&mut 0x2::coin::Coin<0x2::sui::SUI>"] },
+          { name: "stake_free", visibility: "public", params: ["address"] },
+        ],
+      }),
+    },
+    expectedVerdicts: ["MALICIOUS"],
+    minRiskScore: 65,
+  },
+  {
+    label: "Digit substitution domain",
+    input: {
+      objectId: "0xspam0004",
+      objectType: "0xdead0004::fake_foundation::FounderPass",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000004",
+      displayName: "Sui Foundation VIP Founder Pass",
+      displayUrl: "https://sui-f0undation.com/exclusive-nft",
+    },
+    expectedVerdicts: ["MALICIOUS"],
+    minRiskScore: 65,
+  },
+  {
+    label: "NFT phishing mint URL",
+    input: {
+      objectId: "0xspam0005",
+      objectType: "0xdead0005::nft_phish::MintPass",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000005",
+      displayName: "Sui Foundation Official NFT",
+      displayUrl: "https://suifoundation-nft.io/mint",
+    },
+    expectedVerdicts: ["MALICIOUS"],
+    minRiskScore: 65,
+  },
+  {
+    label: "Fake Cetus impersonation",
+    input: {
+      objectId: "0xspam0006",
+      objectType: "0xdead0006::fake_cetus::LPReceipt",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000006",
+      displayName: "Cetus Protocol - Claim LP Rewards",
+      displayUrl: "https://cetus-protocol.xyz/claim-rewards",
+    },
+    expectedVerdicts: ["MALICIOUS"],
+    minRiskScore: 65,
+  },
+  {
+    label: "Approval phish with sweep_all ABI",
+    input: {
+      objectId: "0xspam0007",
+      objectType: "0xdead0007::approval_phish::ApprovalRequest",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000007",
+      displayName: "Sui Wallet Verification Required",
+      displayUrl: "https://verify-su\u0456wallet.com/approve",
+      moveAbi: JSON.stringify({
+        functions: [
+          { name: "request_approval", visibility: "public", params: ["address", "u64"] },
+          { name: "sweep_all", visibility: "private", params: ["&mut 0x2::coin::Coin<0x2::sui::SUI>"] },
+        ],
+      }),
+    },
+    expectedVerdicts: ["MALICIOUS"],
+    minRiskScore: 65,
+  },
+  {
+    label: "Dust attack bulk sender",
+    input: {
+      objectId: "0xspam0008",
+      objectType: "0xdead0008::dust_attack::TrackingDust",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000008",
+      displayName: "0.000001 SUI Transfer",
+      displayUrl: "",
+    },
+    expectedVerdicts: ["SUSPICIOUS", "MALICIOUS"],
+    minRiskScore: 65,
+  },
+  {
+    label: "Rug token hidden freeze/migrate",
+    input: {
+      objectId: "0xspam0009",
+      objectType: "0xdead0009::rug_token::MemeCoin",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000009",
+      displayName: "SuiDoge - 100x Meme Coin",
+      displayUrl: "https://suidoge-token.xyz/stake",
+      moveAbi: JSON.stringify({
+        functions: [
+          { name: "buy", visibility: "public", params: ["address", "u64"] },
+          { name: "sell", visibility: "public", params: ["address", "u64"] },
+          { name: "freeze_all", visibility: "private", params: [] },
+          { name: "migrate_funds", visibility: "private", params: ["address"] },
+        ],
+      }),
+    },
+    expectedVerdicts: ["MALICIOUS"],
+    minRiskScore: 65,
+  },
+  {
+    label: "Fake governance urgency + digit-sub domain",
+    input: {
+      objectId: "0xspam0010",
+      objectType: "0xdead0010::fake_governance::VoteProposal",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000010",
+      displayName: "Sui DAO - Urgent Governance Vote (Expires Soon)",
+      displayUrl: "https://sui-gov0rnance.io/vote",
+    },
+    expectedVerdicts: ["MALICIOUS"],
+    minRiskScore: 65,
+  },
+];
+
+const LEGIT_FIXTURES: Fixture[] = [
+  {
+    label: "Native SUI coin",
+    input: {
+      objectId: "0xlegit0001",
+      objectType: "0x2::coin::Coin<0x2::sui::SUI>",
+      senderAddress: TARGET,
+      displayName: "SUI",
+      displayUrl: null,
+    },
+    expectedVerdicts: ["SAFE"],
+    maxRiskScore: 30,
+  },
+  {
+    label: "USDC from Circle",
+    input: {
+      objectId: "0xlegit0002",
+      objectType: "0x5d4b302506645c37ff133b98c4b50a744f7a58be6b040e4e4d90c5f6b74cbce5::coin::USDC",
+      senderAddress: TARGET,
+      displayName: "USD Coin (USDC)",
+      displayUrl: "https://www.circle.com/usdc",
+    },
+    expectedVerdicts: ["SAFE"],
+    maxRiskScore: 30,
+  },
+  {
+    label: "Cetus LP position",
+    input: {
+      objectId: "0xlegit0003",
+      objectType: "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Position",
+      senderAddress: TARGET,
+      displayName: "Cetus LP Position",
+      displayUrl: "https://cetus.zone",
+    },
+    expectedVerdicts: ["SAFE"],
+    maxRiskScore: 30,
+  },
+  {
+    label: "DeepBook order",
+    input: {
+      objectId: "0xlegit0004",
+      objectType: "0x000000000000000000000000000000000000000000000000000000000000dee9::clob_v2::Order",
+      senderAddress: TARGET,
+      displayName: "DeepBook Order",
+      displayUrl: null,
+    },
+    expectedVerdicts: ["SAFE"],
+    maxRiskScore: 30,
+  },
+  {
+    label: "Sui Kiosk system object",
+    input: {
+      objectId: "0xlegit0005",
+      objectType: "0x2::kiosk::Kiosk",
+      senderAddress: TARGET,
+      displayName: null,
+      displayUrl: null,
+      moveAbi: null,
+    },
+    expectedVerdicts: ["SAFE"],
+    maxRiskScore: 30,
+  },
+];
+
+async function analyze(input: AnalyzeInput): Promise<AnalyzeResponse> {
   const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(`${API_BASE}${path}`, {
-      ...opts,
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json", ...opts?.headers },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status} — ${await res.text()}`);
-    return res.json() as Promise<T>;
-  } finally {
-    clearTimeout(tid);
-  }
-}
-
-function shortId(id: string): string {
-  return `${id.slice(0, 10)}…${id.slice(-6)}`;
-}
-
-// ─── Layer 1: Real Devnet PTB (optional) ─────────────────────────────────────
-
-async function submitDevnetPtb(targetAddress: string): Promise<string | null> {
-  console.log(hdr("Layer 1 — Real Sui Devnet PTB"));
-  try {
-    const keypair = new Ed25519Keypair();
-    const spammerAddress = keypair.getPublicKey().toSuiAddress();
-    console.log(`  Spammer address : ${dim(spammerAddress)}`);
-
-    // Fund from Devnet faucet
-    process.stdout.write("  Requesting faucet funds…");
-    const faucetRes = await fetch(DEVNET_FAUCET, {
+    const res = await fetch(`${API_BASE}/threats/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ FixedAmountRequest: { recipient: spammerAddress } }),
-      signal: AbortSignal.timeout(20_000),
+      body: JSON.stringify(input),
+      signal: controller.signal,
     });
-    if (!faucetRes.ok) throw new Error(`Faucet HTTP ${faucetRes.status}`);
-    console.log(" funded");
-
-    // Wait for coin to land
-    const client = new SuiClient({ url: DEVNET_RPC });
-    let coins: { data: Array<{ coinObjectId: string; balance: string }> } = { data: [] };
-    for (let i = 0; i < 10; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      coins = await client.getCoins({ owner: spammerAddress, coinType: "0x2::sui::SUI" });
-      if (coins.data.length > 0) break;
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     }
-    if (coins.data.length === 0) throw new Error("No coins after faucet — Devnet may be slow");
-    const coin = coins.data[0]!;
-    console.log(`  Gas coin        : ${dim(shortId(coin.coinObjectId))} (${coin.balance} MIST)`);
-
-    // Build PTB: split coin into 5 equal pieces and transfer each to target
-    const tx = new Transaction();
-    tx.setSender(spammerAddress);
-    tx.setGasBudget(10_000_000);
-
-    const AMOUNT = BigInt(1_000); // 1000 MIST each — symbolic, not real value
-    const coins5 = tx.splitCoins(tx.gas, [AMOUNT, AMOUNT, AMOUNT, AMOUNT, AMOUNT]);
-    for (let i = 0; i < 5; i++) {
-      tx.transferObjects([coins5[i]!], targetAddress);
-    }
-
-    const txBytes = await tx.build({ client });
-    const sig = await keypair.signTransaction(txBytes);
-    const result = await client.executeTransactionBlock({
-      transactionBlock: txBytes,
-      signature: sig.signature,
-      options: { showEffects: true },
-    });
-
-    const digest = result.digest;
-    const status = result.effects?.status?.status;
-    if (status !== "success") throw new Error(`TX failed: ${result.effects?.status?.error}`);
-
-    console.log(ok(`PTB executed — digest: ${C.cyan}${digest}${C.reset}`));
-    console.log(`  Explorer: ${dim(`https://suiscan.xyz/devnet/tx/${digest}`)}`);
-    return digest;
-  } catch (e) {
-    console.log(err(`Devnet PTB skipped: ${(e as Error).message}`));
-    console.log(`  ${dim("(This is non-fatal — API-level population will still run)")}`);
-    return null;
+    return (await res.json()) as AnalyzeResponse;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-// ─── Layer 2: API population ──────────────────────────────────────────────────
-
-interface PopulateResult {
-  injected: number;
-  quarantined: number;
-  txDigest: string | null;
-  threats: Array<{
-    objectId: string;
-    objectType: string;
-    verdict: string;
-    riskScore: number;
-    threatId: number | null;
-  }>;
+function checkFixture(fixture: Fixture, response: AnalyzeResponse): string[] {
+  const failures: string[] = [];
+  if (!fixture.expectedVerdicts.includes(response.verdict)) {
+    failures.push(`verdict ${response.verdict} != expected ${fixture.expectedVerdicts.join("|")}`);
+  }
+  if (fixture.minRiskScore !== undefined && response.riskScore < fixture.minRiskScore) {
+    failures.push(`score ${response.riskScore} < ${fixture.minRiskScore}`);
+  }
+  if (fixture.maxRiskScore !== undefined && response.riskScore > fixture.maxRiskScore) {
+    failures.push(`score ${response.riskScore} > ${fixture.maxRiskScore}`);
+  }
+  return failures;
 }
 
-async function runPopulateApi(targetAddress: string, txDigest: string | null): Promise<PopulateResult> {
-  console.log(hdr("Layer 2 — API population (AI analysis pipeline)"));
-  console.log(`  ${dim("Running 5 spam objects through Gemini / mock analysis…")}`);
-  console.log(`  ${dim("(Each goes through the chain rate limiter — ~9s each)")}`);
+function printHeader(): void {
+  console.log(`\n${C.bold}${C.cyan}╔══════════════════════════════════════════════════╗${C.reset}`);
+  console.log(`${C.bold}${C.cyan}║  DeepClean - Spam vs Legit Population & Test    ║${C.reset}`);
+  console.log(`${C.bold}${C.cyan}╚══════════════════════════════════════════════════╝${C.reset}`);
+}
 
-  const start = Date.now();
-  const result = await apiFetch<PopulateResult>("/populate-wallet", {
-    method: "POST",
-    body: JSON.stringify({ targetAddress, txDigest }),
-  });
-  const elapsed = Date.now() - start;
-
-  for (const t of result.threats) {
-    const badge = t.verdict === "MALICIOUS" ? `${C.red}MALICIOUS${C.reset}` :
-                  t.verdict === "SUSPICIOUS" ? `${C.yellow}SUSPICIOUS${C.reset}` :
-                  `${C.green}SAFE${C.reset}`;
-    const stored = t.threatId ? ok(`threat #${t.threatId}`) : dim("not stored (low risk)");
-    console.log(`  [${badge}] score=${t.riskScore} ${dim(shortId(t.objectId))}  → ${stored}`);
+async function runGroup(name: string, fixtures: Fixture[]): Promise<{ passed: number; failed: number }> {
+  if (fixtures.length === 0) {
+    return { passed: 0, failed: 0 };
   }
 
-  console.log(`\n  ${dim(`Elapsed: ${elapsed}ms`)}`);
-  console.log(ok(`Injected: ${result.injected}  Quarantined: ${result.quarantined}`));
-  return result;
-}
-
-// ─── Layer 3: Verification ────────────────────────────────────────────────────
-
-interface Threat {
-  id: number;
-  objectId: string;
-  verdict: string;
-  riskScore: number;
-  status: string;
-}
-
-async function verifyLayer3(result: PopulateResult): Promise<boolean> {
-  console.log(hdr("Layer 3 — Verification (API round-trip)"));
+  console.log(`\n${C.bold}${name}${C.reset}`);
 
   let passed = 0;
   let failed = 0;
 
-  for (const t of result.threats) {
-    if (!t.threatId) continue;
+  for (let i = 0; i < fixtures.length; i++) {
+    const fixture = fixtures[i]!;
+    const prefix = `  [${i + 1}/${fixtures.length}] ${fixture.label}...`;
+
     try {
-      const fetched = await apiFetch<Threat>(`/threats/${t.threatId}`);
-      if (fetched.status === "quarantined" && fetched.verdict === t.verdict) {
-        console.log(ok(`Threat #${t.threatId}: status=quarantined, verdict=${t.verdict}`));
-        passed++;
+      const response = await analyze(fixture.input);
+      const failures = checkFixture(fixture, response);
+      const status = failures.length === 0
+        ? `${C.green}PASS${C.reset}`
+        : `${C.red}FAIL${C.reset}`;
+
+      console.log(`  [${i + 1}/${fixtures.length}] ${fixture.label}... ${colorVerdict(response.verdict)} score=${response.riskScore} ${failures.length === 0 ? "✅" : "❌"} ${status}`);
+
+      if (failures.length === 0) {
+        passed += 1;
       } else {
-        console.log(err(`Threat #${t.threatId}: unexpected status=${fetched.status}`));
-        failed++;
+        failed += 1;
+        console.log(`       reason: ${failures.join("; ")}`);
+        console.log(`       reasoning: ${response.reasoning}`);
+        console.log(`       flags: ${response.flags.length > 0 ? response.flags.join(", ") : "NONE"}`);
       }
     } catch (e) {
-      console.log(err(`Threat #${t.threatId}: fetch failed — ${(e as Error).message}`));
-      failed++;
+      failed += 1;
+      const message = e instanceof Error ? e.message : String(e);
+      console.log(`${prefix} ${C.red}ERROR${C.reset} ❌`);
+      console.log(`       request failed: ${message}`);
     }
   }
 
-  if (passed === 0 && failed === 0) {
-    console.log(dim("  (No quarantined threats to verify — all may have scored < 65)"));
-  }
-
-  return failed === 0;
+  return { passed, failed };
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
-
 async function main(): Promise<void> {
-  console.log(`\n${C.bold}${C.cyan}╔════════════════════════════════════════════╗${C.reset}`);
-  console.log(`${C.bold}${C.cyan}║  DeepClean — Wallet Population Script      ║${C.reset}`);
-  console.log(`${C.bold}${C.cyan}╚════════════════════════════════════════════╝${C.reset}`);
-
   if (!TARGET_ADDRESS) {
-    console.error(err("--address <sui_wallet_address> is required"));
-    console.error(dim("  Example: pnpm run populate --address 0x1234..."));
+    console.error(`${C.red}--address is required${C.reset}`);
+    usage();
+    process.exit(1);
+  }
+  if (SPAM_ONLY && LEGIT_ONLY) {
+    console.error(`${C.red}--spam-only and --legit-only cannot be used together${C.reset}`);
+    usage();
     process.exit(1);
   }
 
-  console.log(`\n  Target address : ${C.cyan}${TARGET_ADDRESS}${C.reset}`);
-  console.log(`  API base       : ${dim(API_BASE)}`);
-  console.log(`  Devnet PTB     : ${USE_DEVNET ? C.green + "enabled" : dim("disabled (use --devnet to enable)")}${C.reset}`);
+  const spamFixtures = LEGIT_ONLY ? [] : SPAM_FIXTURES;
+  const legitFixtures = SPAM_ONLY ? [] : LEGIT_FIXTURES;
 
-  // Layer 1 — optional real PTB
-  let txDigest: string | null = null;
-  if (USE_DEVNET) {
-    txDigest = await submitDevnetPtb(TARGET_ADDRESS);
+  printHeader();
+  console.log(`\n  Target address: ${C.cyan}${TARGET}${C.reset}`);
+  console.log(`  API base      : ${C.dim}${API_BASE}${C.reset}`);
+  console.log(`  Mode          : ${C.dim}${SPAM_ONLY ? "spam-only" : LEGIT_ONLY ? "legit-only" : "mixed"}${C.reset}`);
+
+  const spamResult = await runGroup("Spam Cases", spamFixtures);
+  const legitResult = await runGroup("Legit Cases", legitFixtures);
+
+  const totalPassed = spamResult.passed + legitResult.passed;
+  const totalFailed = spamResult.failed + legitResult.failed;
+
+  if (spamFixtures.length > 0) {
+    console.log(`\n  Spam detected correctly   : ${spamResult.passed}/${spamFixtures.length}`);
   }
-
-  // Layer 2 — API population
-  const result = await runPopulateApi(TARGET_ADDRESS, txDigest);
-
-  // Layer 3 — verification
-  const layer3ok = await verifyLayer3(result);
-
-  // ── Summary ──────────────────────────────────────────────────────────────────
-  console.log(`\n${C.bold}${"─".repeat(50)}${C.reset}`);
-  console.log(`  Objects analyzed  : ${result.injected}`);
-  console.log(`  Objects quarantined: ${result.quarantined}`);
-  if (result.txDigest) {
-    console.log(`  Devnet TX digest  : ${C.cyan}${result.txDigest}${C.reset}`);
-    console.log(`  Explorer          : ${dim(`https://suiscan.xyz/devnet/tx/${result.txDigest}`)}`);
+  if (legitFixtures.length > 0) {
+    console.log(`  Legit cleared correctly   : ${legitResult.passed}/${legitFixtures.length}`);
   }
-  console.log(`${C.bold}${"─".repeat(50)}${C.reset}`);
+  console.log(`  Total : ${totalPassed} passed, ${totalFailed} failed`);
 
-  const allOk = result.quarantined > 0 && layer3ok;
-  if (allOk) {
-    console.log(`\n${C.green}${C.bold}✅  Population complete — dashboard should now show new threats.${C.reset}\n`);
+  if (totalFailed === 0) {
+    console.log(`\n${C.green}${C.bold}✅  All objects classified correctly.${C.reset}\n`);
     process.exit(0);
-  } else {
-    console.log(`\n${C.red}${C.bold}❌  Population had issues — check output above.${C.reset}\n`);
-    process.exit(1);
   }
+
+  console.log(`\n${C.red}${C.bold}❌  Classification mismatches detected.${C.reset}\n`);
+  process.exit(1);
 }
 
 main().catch((e: unknown) => {
-  console.error(err(String(e)));
+  const msg = e instanceof Error ? e.message : String(e);
+  console.error(`${C.red}${msg}${C.reset}`);
   process.exit(1);
 });

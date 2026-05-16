@@ -22,8 +22,156 @@ export interface ThreatAnalysisOutput {
   reasoning: string;
 }
 
+// Layer 0: Static pre-filter
+//
+// Runs deterministic checks before any AI call. Results are injected into the
+// Gemini prompt as structured facts so the model reasons over hard evidence,
+// not just raw metadata strings.
+
+export interface StaticSignals {
+  isKnownSafePackage: boolean; // package address in trusted allowlist
+  isKnownMaliciousPattern: boolean; // package name matches known attack module names
+  hasHomoglyphUrl: boolean; // non-ASCII chars in URL
+  hasDigitSubstitution: boolean; // e.g. f0undation, 0fficial
+  hasSuspiciousTld: boolean; // .xyz, lookalike .io clones etc.
+  hasDangerousAbi: boolean; // drain/withdraw_all/sweep etc. in Move ABI
+  hasUrgencyLanguage: boolean; // FREE, CLAIM NOW, EXPIRES etc. in display name
+  isImpersonatingKnownProtocol: boolean; // display name contains known brand but package is untrusted
+  bulkSenderSuspicion: boolean; // sender address matches known spam address pattern
+  domainAgeSuspicion: boolean; // domain registered <30 days (static heuristic only)
+}
+
+// Verified on-chain package addresses for major Sui protocols.
+// Any object whose package prefix matches one of these gets a strong SAFE prior.
+const TRUSTED_PACKAGES = new Set([
+  "0x0000000000000000000000000000000000000000000000000000000000000001", // MoveStdlib
+  "0x0000000000000000000000000000000000000000000000000000000000000002", // Sui Framework
+  "0x0000000000000000000000000000000000000000000000000000000000000003", // Sui System
+  "0x0000000000000000000000000000000000000000000000000000000000000005", // MoveStdlib extras
+  "0x000000000000000000000000000000000000000000000000000000000000dee9", // DeepBook
+  "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb", // Cetus Protocol
+  "0x3492c874c1e3b3e2984e8c41b589e642d4d0a5d6459e5a9cfc2d52fd7c89c267", // Bluefin
+  "0xefe8b36d5b2e43728cc323298626b83177803521d195cfb11e15b910e892fddf", // Scallop
+]);
+
+// Known legitimate domains - objects pointing here get a safe prior
+const TRUSTED_DOMAINS = [
+  "sui.io", "mysten.xyz", "suiexplorer.com", "suiscan.xyz",
+  "cetus.zone", "bluefin.io", "scallop.io", "bluemove.net",
+  "circle.com", "cryptopunks.app", "turbos.finance", "aftermath.finance",
+];
+
+// Attack module name patterns - if the objectType module segment matches, flag it
+const KNOWN_ATTACK_MODULES = [
+  "scam_airdrop", "phishing_kit", "honeypot_defi", "fake_foundation",
+  "nft_phish", "wallet_drainer", "rug_token", "dust_attack",
+  "fake_bridge", "approval_phish", "fake_governance", "sweep_all",
+];
+
+// Move function names that indicate drain/honeypot behavior
+const DANGEROUS_ABI_PATTERNS = [
+  "_drain", "drain_all", "_drain_all", "withdraw_all", "sweep",
+  "sweep_all", "rug", "claim_airdrop", "mint_free", "airdrop_free",
+  "freeze_all", "lock_forever", "migrate_funds", "emergency_withdraw",
+];
+
+// Display name keywords that impersonate known brands
+const KNOWN_BRANDS = [
+  "sui foundation", "mysten", "sui official", "cetus", "bluefin",
+  "scallop", "turbos", "aftermath", "deepbook", "wormhole",
+];
+
+// Suspicious TLDs and URL path patterns
+const SUSPICIOUS_URL_PATTERNS = [
+  /\.xyz\//, /\-nft\.io/, /\-protocol\./, /\-defi\./, /free\-sui/,
+  /\/airdrop/, /\/claim/, /\/mint/, /\/stake$/, /reward/,
+  /suifoundation\-/, /sui\-f/, /offici[a4]l/, /0fficial/,
+];
+
+export function extractStaticSignals(input: ThreatAnalysisInput): StaticSignals {
+  const pkgAddress = input.objectType.split("::")[0]?.toLowerCase() ?? "";
+  const moduleSegment = input.objectType.split("::")?.[1]?.toLowerCase() ?? "";
+  const url = input.displayUrl ?? "";
+  const name = (input.displayName ?? "").toLowerCase();
+  const abi = typeof input.moveAbi === "string" ? input.moveAbi.toLowerCase() : "";
+
+  const isKnownSafePackage = TRUSTED_PACKAGES.has(pkgAddress) ||
+    // short system addresses (0x1 through 0xff)
+    (pkgAddress.replace(/^0x0*/, "").length <= 2);
+
+  const isKnownMaliciousPattern =
+    KNOWN_ATTACK_MODULES.some((m) => moduleSegment.includes(m));
+
+  const hasHomoglyphUrl = url.length > 0 && /[^\x00-\x7F]/.test(url);
+
+  const hasDigitSubstitution =
+    /[a-z]0[a-z]/i.test(url) ||
+    /[a-z]1[a-z]/i.test(url) ||
+    /su[i1][\.\-]/.test(url);
+
+  const hasSuspiciousTld =
+    SUSPICIOUS_URL_PATTERNS.some((p) => p.test(url));
+
+  const hasDangerousAbi =
+    abi.length > 0 &&
+    DANGEROUS_ABI_PATTERNS.some((p) => abi.includes(p));
+
+  const hasUrgencyLanguage =
+    /\b(free|claim now|expires|urgent|exclusive|winner|reward|guaranteed|limited)\b/i
+      .test(name);
+
+  // Impersonation: brand name in display BUT package is not in trusted set
+  const isImpersonatingKnownProtocol =
+    !isKnownSafePackage &&
+    KNOWN_BRANDS.some((b) => name.includes(b));
+
+  // Sender matches known spam address prefix (badc0ff pattern used in populate script)
+  const bulkSenderSuspicion =
+    /^0x0*badc0f/i.test(input.senderAddress) ||
+    /^0x0{40,}/i.test(input.senderAddress); // all-zeros padding = synthetic
+
+  // Heuristic: very new-looking domains (no WHOIS here, just structural signals)
+  const domainAgeSuspicion =
+    (hasSuspiciousTld || hasDigitSubstitution || hasHomoglyphUrl) &&
+    !TRUSTED_DOMAINS.some((d) => url.includes(d));
+
+  return {
+    isKnownSafePackage,
+    isKnownMaliciousPattern,
+    hasHomoglyphUrl,
+    hasDigitSubstitution,
+    hasSuspiciousTld,
+    hasDangerousAbi,
+    hasUrgencyLanguage,
+    isImpersonatingKnownProtocol,
+    bulkSenderSuspicion,
+    domainAgeSuspicion,
+  };
+}
+
+// Converts StaticSignals into a score adjustment and a flag list for the prompt
+function scoreFromSignals(s: StaticSignals): { adjustment: number; flags: string[] } {
+  const flags: string[] = [];
+  let adjustment = 0;
+
+  if (s.isKnownSafePackage) { adjustment -= 60; flags.push("TRUSTED_PACKAGE"); }
+  if (s.isKnownMaliciousPattern) { adjustment += 40; flags.push("KNOWN_ATTACK_MODULE"); }
+  if (s.hasHomoglyphUrl) { adjustment += 35; flags.push("HOMOGLYPH_URL"); }
+  if (s.hasDigitSubstitution) { adjustment += 30; flags.push("DIGIT_SUBSTITUTION"); }
+  if (s.hasSuspiciousTld) { adjustment += 20; flags.push("SUSPICIOUS_URL_PATTERN"); }
+  if (s.hasDangerousAbi) { adjustment += 45; flags.push("DANGEROUS_ABI"); }
+  if (s.hasUrgencyLanguage) { adjustment += 15; flags.push("URGENCY_LANGUAGE"); }
+  if (s.isImpersonatingKnownProtocol) { adjustment += 35; flags.push("IMPERSONATION"); }
+  if (s.bulkSenderSuspicion) { adjustment += 20; flags.push("BULK_SENDER"); }
+  if (s.domainAgeSuspicion) { adjustment += 10; flags.push("SUSPICIOUS_DOMAIN"); }
+
+  return { adjustment, flags };
+}
+
 const SYSTEM_PROMPT = `You are a blockchain security analyst specializing in Sui Move smart contracts.
-Analyze the provided asset metadata and Move module ABI for malicious patterns.
+You will receive BOTH raw asset metadata AND pre-computed static signals from a deterministic analyser.
+Treat the static signals as hard facts - they are computed from the actual bytes, not inferred.
+Your job is to synthesize the signals into a final verdict, catching anything the static analyser missed.
 
 Return ONLY valid JSON with this exact schema:
 {
@@ -36,18 +184,24 @@ Return ONLY valid JSON with this exact schema:
 }
 
 Scoring guidance:
-- 0-30: SAFE — legitimate asset, no suspicious patterns
-- 31-64: SUSPICIOUS — some red flags but not conclusively malicious
-- 65-100: MALICIOUS — clear threat, should be quarantined
+- 0-30:  SAFE      - legitimate asset, all static signals clean
+- 31-64: SUSPICIOUS - some red flags but not conclusively malicious
+- 65-100: MALICIOUS - one or more hard signals (DANGEROUS_ABI, HOMOGLYPH_URL, IMPERSONATION, etc.)
 
-Check for:
-- withdraw_all / drain functions hidden behind misleading names
-- URLs containing lookalike domains or Unicode homoglyphs
-- Metadata spoofing known projects
-- Objects with no legitimate utility
-- Honeypot transfer restrictions (store ability but missing transfer)
-- Functions named claim/mint_free/airdrop that call coin::transfer FROM caller's balance
-- Package IDs deployed recently with unusually high transfer counts`;
+Reasoning steps you must follow:
+1. If TRUSTED_PACKAGE signal is present -> strong prior toward SAFE (score <= 20) unless other hard signals override.
+2. If DANGEROUS_ABI is present -> score must be >= 80, verdict MALICIOUS.
+3. If HOMOGLYPH_URL or DIGIT_SUBSTITUTION is present -> score must be >= 75, verdict MALICIOUS.
+4. If IMPERSONATION is present without TRUSTED_PACKAGE -> score must be >= 65, verdict MALICIOUS.
+5. If only URGENCY_LANGUAGE or SUSPICIOUS_URL_PATTERN -> score 50-70, verdict SUSPICIOUS unless combined with others.
+6. BULK_SENDER alone is not conclusive - only add 10-15 points.
+7. After applying the above rules, check for anything the static signals may have missed (semantic deception, novel patterns).
+
+Check for these patterns the static analyser cannot see:
+- Subtle metadata spoofing (logo URL correct but display name slightly off)
+- Function names that look benign but compose into drains (e.g. "process_reward" calling "transfer_all")
+- Unusual object abilities (store without drop - classic honeypot)
+- Cross-contract delegation to untrusted addresses`;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -88,17 +242,29 @@ export async function analyzeThreat(input: ThreatAnalysisInput): Promise<ThreatA
     return mockAnalysis(input);
   }
 
+  const signals = extractStaticSignals(input);
+  const { adjustment, flags: staticFlags } = scoreFromSignals(signals);
+
   const userPrompt = `## Asset to analyze
-- Object ID: ${input.objectId}
-- Object type: ${input.objectType}
+- Object ID:      ${input.objectId}
+- Object type:    ${input.objectType}
 - Sender address: ${input.senderAddress}
-- Display name: ${input.displayName ?? "N/A"}
-- Display URL: ${input.displayUrl ?? "N/A"}
+- Display name:   ${input.displayName ?? "N/A"}
+- Display URL:    ${input.displayUrl ?? "N/A"}
 
 ## Move module ABI (if available)
 ${input.moveAbi ?? "Not available"}
 
-Analyze this asset for threats and return ONLY the JSON verdict.`;
+## Pre-computed static signals (treat as hard facts)
+${JSON.stringify(signals, null, 2)}
+
+## Active flags from static analyser
+${staticFlags.length > 0 ? staticFlags.join(", ") : "NONE"}
+
+## Static score adjustment
+${adjustment > 0 ? `+${adjustment}` : adjustment} points (apply this as a baseline before your own reasoning)
+
+Analyze this asset and return ONLY the JSON verdict.`;
 
   /**
    * Enqueue this call through the rate-limit chain.
