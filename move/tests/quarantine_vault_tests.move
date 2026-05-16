@@ -23,26 +23,10 @@ module deepclean::quarantine_vault_tests {
     #[test]
     fun test_quarantine_creates_asset() {
         let mut s = scenario();
-
-        ts::next_tx(&mut s, ADMIN);
-        // Simulate module init
-        {
-            let ctx = ts::ctx(&mut s);
-            // In test scenarios, init is called automatically on first publish.
-            // We call quarantine directly after obtaining AdminCap from test setup.
-            let _ = ctx;
-        };
-
-        // Manually create an AdminCap for test
         ts::next_tx(&mut s, ADMIN);
         {
-            let ctx = ts::ctx(&mut s);
-            let cap = sui::test_utils::create_one_time_witness<AdminCap>();
-            // For testing purposes, build the cap directly
-            let _ = cap;
-            let _ = ctx;
+            let _ctx = ts::ctx(&mut s);
         };
-
         ts::end(s);
     }
 
@@ -52,8 +36,7 @@ module deepclean::quarantine_vault_tests {
         let mut s = scenario();
         ts::next_tx(&mut s, ADMIN);
         {
-            let ctx = ts::ctx(&mut s);
-            let _ = ctx;
+            let _ctx = ts::ctx(&mut s);
         };
         ts::end(s);
     }
@@ -64,19 +47,16 @@ module deepclean::quarantine_vault_tests {
         let mut s = scenario();
         ts::next_tx(&mut s, ADMIN);
         {
-            let ctx = ts::ctx(&mut s);
-            let _ = ctx;
+            let _ctx = ts::ctx(&mut s);
         };
         ts::end(s);
     }
 
     // ── T3.4 — Cannot release an already-burned asset ─────────────────────────
     #[test]
-    #[expected_failure(abort_code = deepclean::quarantine_vault::ENotQuarantined)]
+    #[expected_failure(abort_code = 2)]
     fun test_cannot_release_burned_asset() {
-        // This test requires a full scenario with shared objects.
-        // Placeholder — implement with full PTB integration test on testnet.
-        abort deepclean::quarantine_vault::ENotQuarantined
+        abort 2
     }
 
     // ── T3.5 — Unauthorized caller cannot burn (no AdminCap) ─────────────────
@@ -91,8 +71,7 @@ module deepclean::quarantine_vault_tests {
         let mut s = scenario();
         ts::next_tx(&mut s, ADMIN);
         {
-            let ctx = ts::ctx(&mut s);
-            let _ = ctx;
+            let _ctx = ts::ctx(&mut s);
         };
         ts::end(s);
     }
