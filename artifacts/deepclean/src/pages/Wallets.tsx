@@ -197,6 +197,7 @@ export default function Wallets() {
   const account = useCurrentAccount();
 
   const [populatingId, setPopulatingId] = useState<number | null>(null);
+  const [cleaningId, setCleaningId] = useState<number | null>(null);
   const [externalConnected, setExternalConnected] = useState<{ provider: string; address: string } | null>(null);
   const [localWallets, setLocalWallets] = useState<WalletRow[]>([]);
 
@@ -350,6 +351,20 @@ export default function Wallets() {
     appendSeedLog(walletId, mkLog("info", "  Cleaning quarantined threats…"));
     try {
       const cleanResult = await cleanWalletApi();
+
+      if (!cleanResult || (cleanResult.cleaned === 0 && (!cleanResult.threats || cleanResult.threats.length === 0))) {
+        appendSeedLog(walletId, mkLog("info", "No quarantined threats to clean"));
+        appendSeedLog(walletId, mkLog("success", `✓ Deep clean complete — 0 threats burned`));
+        return true;
+      }
+
+      // Log each cleaned threat entry into the same seed log
+      if (Array.isArray(cleanResult.threats) && cleanResult.threats.length > 0) {
+        cleanResult.threats.forEach((threatId, i) => {
+          appendSeedLog(walletId, mkLog("success", `  [${i + 1}] Threat #${threatId} → status: burned`));
+        });
+      }
+
       appendSeedLog(walletId, mkLog("success", `✓ Deep clean complete — ${cleanResult.cleaned} threats burned`));
       return true;
     } catch (cleanError) {
@@ -361,6 +376,24 @@ export default function Wallets() {
         variant: "destructive",
       });
       return false;
+    }
+  }
+
+  async function handleClean(wallet: WalletRow) {
+    const walletId = wallet.id ?? -1;
+    setOpenSeedLog(walletId);
+    // Ensure log array exists and append a separator
+    setSeedLogs((prev) => ({ ...prev, [walletId]: [...(prev[walletId] ?? []), mkLog("info", "───")] }));
+    setCleaningId(walletId);
+    appendSeedLog(walletId, mkLog("info", `Target: ${wallet.address}`));
+
+    const success = await performDeepClean(walletId);
+
+    setCleaningId(null);
+    if (success) {
+      queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
+      toast({ title: `Deep clean finished`, description: `${wallet.label} cleaned` });
     }
   }
 
@@ -427,8 +460,8 @@ export default function Wallets() {
       }
 
       if (quarantined.length > 0) {
-        const cleaned = await performDeepClean(walletId);
-        if (!cleaned) return;
+        appendSeedLog(walletId, mkLog("info", "  Spam batch complete. Click 'Seed spam' again to add 5 more."));
+        appendSeedLog(walletId, mkLog("info", "  Click 'Clean' when ready to burn all quarantined threats."));
       }
 
       appendSeedLog(walletId, mkLog("success", "✓ Dashboard & threat list refreshed"));
@@ -580,7 +613,7 @@ export default function Wallets() {
                   size="sm"
                   className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-cyan-400 hover:bg-cyan-500/10 shrink-0"
                   onClick={() => populate.mutate({ address: wallet.address })}
-                  disabled={populate.isPending}
+                  disabled={populatingId === wallet.id || cleaningId === wallet.id}
                   title="Seed wallet with 5 synthetic spam objects for demo"
                   data-testid={`button-seed-wallet-${wallet.id}`}
                 >
@@ -593,6 +626,29 @@ export default function Wallets() {
                     <>
                       <Zap className="w-3 h-3" />
                       <span className="hidden sm:inline">Seed spam</span>
+                    </>
+                  )}
+                </Button>
+
+                {/* Clean button (per-wallet) */}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-rose-400 hover:bg-rose-500/10 shrink-0"
+                  onClick={() => handleClean(wallet)}
+                  disabled={populatingId === wallet.id || cleaningId === wallet.id}
+                  title="Clean quarantined threats for this wallet"
+                  data-testid={`button-clean-wallet-${wallet.id}`}
+                >
+                  {cleaningId === wallet.id ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span className="hidden sm:inline">Cleaning…</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-3 h-3" />
+                      <span className="hidden sm:inline">Clean</span>
                     </>
                   )}
                 </Button>
