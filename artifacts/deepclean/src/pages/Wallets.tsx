@@ -9,6 +9,7 @@ import {
   getListWatchedWalletsQueryKey,
   getGetDashboardStatsQueryKey,
   getListThreatsQueryKey,
+  type WatchedWallet,
 } from "@workspace/api-client-react";
 import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -18,6 +19,42 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { walletSchema, type WalletFormValues } from "@/lib/schemas";
 import { Trash2, Plus, Wallet, AlertTriangle, Zap } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+
+type LocalWallet = {
+  id: number;
+  address: string;
+  label: string;
+  isActive: boolean;
+  threatsDetected?: number;
+  createdAt: string;
+  localOnly?: boolean;
+};
+
+type WalletRow = WatchedWallet & {
+  localOnly?: boolean;
+};
+
+const LOCAL_WALLETS_KEY = "deepclean.localWatchedWallets";
+const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+
+function readLocalWallets(): WalletRow[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_WALLETS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalWallets(wallets: WalletRow[]) {
+  try {
+    localStorage.setItem(LOCAL_WALLETS_KEY, JSON.stringify(wallets));
+  } catch {
+    // ignore storage failures
+  }
+}
 
 interface PopulateResult {
   injected: number;
@@ -33,7 +70,7 @@ interface PopulateResult {
 }
 
 async function populateWalletApi(targetAddress: string): Promise<PopulateResult> {
-  const res = await fetch("/api/populate-wallet", {
+  const res = await fetch(new URL("/api/populate-wallet", API_BASE).toString(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ targetAddress }),
@@ -48,6 +85,7 @@ export default function Wallets() {
   const [populatingId, setPopulatingId] = useState<number | null>(null);
   const account = useCurrentAccount();
   const [externalConnected, setExternalConnected] = useState<{ provider: string; address: string } | null>(null);
+  const [localWallets, setLocalWallets] = useState<WalletRow[]>([]);
 
   useEffect(() => {
     try {
@@ -69,9 +107,18 @@ export default function Wallets() {
     return () => window.removeEventListener("externalWallet:connected", handler as EventListener);
   }, []);
 
+  useEffect(() => {
+    setLocalWallets(readLocalWallets());
+  }, []);
+
   const { data: wallets, isLoading } = useListWatchedWallets();
 
-  const safeWallets = Array.isArray(wallets) ? wallets : [];
+  const safeWallets: WalletRow[] = Array.isArray(wallets)
+    ? wallets.map((wallet) => ({ ...wallet, localOnly: false }))
+    : [];
+  const mergedWallets: WalletRow[] = [...safeWallets, ...localWallets].filter(
+    (wallet, index, list) => list.findIndex((item) => item.address === wallet.address) === index,
+  );
 
   const form = useForm<WalletFormValues>({
     resolver: zodResolver(walletSchema),
@@ -84,17 +131,55 @@ export default function Wallets() {
     if (connected) {
       form.setValue("address", connected);
     }
-  }, [account?.address, form, externalConnected]);
+  }, [account?.address, externalConnected, form]);
 
   const add = useAddWatchedWallet({
     mutation: {
-      onSuccess: () => {
+      onSuccess: (createdWallet) => {
         queryClient.invalidateQueries({ queryKey: getListWatchedWalletsQueryKey() });
         form.reset();
+        setLocalWallets((current) => {
+          const next = current.filter((wallet) => wallet.address !== createdWallet.address);
+          writeLocalWallets(next);
+          return next;
+        });
         toast({ title: "Wallet added", description: "Now monitoring this address for threats." });
       },
-      onError: () => {
-        form.setError("address", { message: "Failed to add wallet. Address may already be monitored." });
+      onError: (error, variables) => {
+        const address = variables.data.address;
+        const label = variables.data.label;
+        const alreadyVisible = mergedWallets.some((wallet) => wallet.address === address);
+
+        if (!alreadyVisible) {
+          const fallbackWallet: WalletRow = {
+            id: -Date.now(),
+            address,
+            label,
+            isActive: true,
+            threatsDetected: 0,
+            createdAt: new Date().toISOString(),
+            localOnly: true,
+          };
+
+          setLocalWallets((current) => {
+            const next = [...current.filter((wallet) => wallet.address !== address), fallbackWallet];
+            writeLocalWallets(next);
+            return next;
+          });
+        }
+
+        const isNetworkFailure =
+          !navigator.onLine ||
+          error instanceof TypeError ||
+          (error instanceof Error && /fetch|network/i.test(error.message));
+
+        form.setError("address", {
+          message: isNetworkFailure
+            ? "Backend is offline. Wallet saved locally for now."
+            : error instanceof Error
+              ? error.message
+              : "Failed to add wallet.",
+        });
       },
     },
   });
@@ -206,8 +291,8 @@ export default function Wallets() {
           Array.from({ length: 3 }).map((_, i) => (
             <Skeleton key={i} className="h-20 rounded-lg" />
           ))
-        ) : safeWallets.length > 0 ? (
-          safeWallets.map((wallet) => (
+        ) : mergedWallets.length > 0 ? (
+          mergedWallets.map((wallet) => (
             <div
               key={wallet.id}
               data-testid={`card-wallet-${wallet.id}`}
@@ -229,6 +314,11 @@ export default function Wallets() {
                   <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${wallet.isActive ? "bg-green-500/15 text-green-400" : "bg-zinc-500/15 text-zinc-400"}`}>
                     {wallet.isActive ? "Active" : "Inactive"}
                   </span>
+                  {wallet.localOnly && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400">
+                      Local
+                    </span>
+                  )}
                 </div>
                 <div className="font-mono text-xs text-muted-foreground truncate mt-0.5" data-testid={`text-wallet-address-${wallet.id}`}>
                   {wallet.address}

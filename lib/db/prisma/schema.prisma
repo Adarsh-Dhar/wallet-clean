@@ -1,0 +1,44 @@
+// This file replaces lib/db/src/schema/threats.ts and lib/db/src/schema/wallets.ts
+// Place this file at: lib/db/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Threat {
+  id                 Int       @id @default(autoincrement())
+  objectId           String    @map("object_id")
+  objectType         String    @map("object_type")
+  senderAddress      String    @map("sender_address")
+  displayName        String?   @map("display_name")
+  displayUrl         String?   @map("display_url")
+  riskScore          Int       @map("risk_score")
+  verdict            String    // "SAFE" | "SUSPICIOUS" | "MALICIOUS"
+  reasonCode         Int       @map("reason_code")
+  confidence         Float
+  flags              Json      @default("[]")
+  reasoning          String
+  status             String    @default("quarantined") // "quarantined" | "released" | "burned"
+  walrusBlobId       String?   @map("walrus_blob_id")
+  quarantineTxDigest String?   @map("quarantine_tx_digest")
+  detectedAt         DateTime  @default(now()) @map("detected_at")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@map("threats")
+}
+
+model WatchedWallet {
+  id              Int      @id @default(autoincrement())
+  address         String   @unique
+  label           String
+  isActive        Boolean  @default(true) @map("is_active")
+  threatsDetected Int      @default(0)   @map("threats_detected")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@map("watched_wallets")
+}

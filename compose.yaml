@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: deepclean
+      POSTGRES_USER: deepclean
+      POSTGRES_PASSWORD: deepclean
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://deepclean:deepclean@postgres:5432/deepclean
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    depends_on:
+      - postgres
+
+  frontend:
+    build:
+      context: .
+      dockerfile: artifacts/deepclean/Dockerfile
+    ports:
+      - "3000:80"
+    environment:
+      VITE_API_BASE: http://localhost:8080
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

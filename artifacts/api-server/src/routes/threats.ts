@@ -1,7 +1,6 @@
+// artifacts/api-server/src/routes/threats.ts
 import { Router } from "express";
-import { db } from "@workspace/db";
-import { threatsTable } from "@workspace/db";
-import { eq, desc, and, SQL } from "drizzle-orm";
+import { prisma } from "@workspace/db";
 import {
   ListThreatsQueryParams,
   AnalyzeThreatBody,
@@ -24,23 +23,21 @@ router.get("/threats", async (req, res) => {
 
   const { verdict, status, limit = 50, offset = 0 } = query.data;
 
-  const conditions: SQL[] = [];
-  if (verdict) conditions.push(eq(threatsTable.verdict, verdict));
-  if (status) conditions.push(eq(threatsTable.status, status));
-
-  const threats = await db
-    .select()
-    .from(threatsTable)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(threatsTable.detectedAt))
-    .limit(limit)
-    .offset(offset);
+  const threats = await prisma.threat.findMany({
+    where: {
+      ...(verdict ? { verdict } : {}),
+      ...(status  ? { status }  : {}),
+    },
+    orderBy: { detectedAt: "desc" },
+    take: limit,
+    skip: offset,
+  });
 
   res.json(
     threats.map((t) => ({
       ...t,
       detectedAt: t.detectedAt.toISOString(),
-      updatedAt: t.updatedAt.toISOString(),
+      updatedAt:  t.updatedAt.toISOString(),
     }))
   );
 });
@@ -57,83 +54,77 @@ router.post("/threats/analyze", async (req, res) => {
   const startMs = Date.now();
 
   try {
-    // Fire AI analysis and Walrus log write in parallel where possible.
-    // Walrus write starts before we have AI results, so we serialize it after.
     const verdict = await analyzeThreat({
-      objectId: input.objectId,
-      objectType: input.objectType,
+      objectId:      input.objectId,
+      objectType:    input.objectType,
       senderAddress: input.senderAddress,
-      displayName: input.displayName,
-      displayUrl: input.displayUrl,
-      moveAbi: input.moveAbi,
+      displayName:   input.displayName,
+      displayUrl:    input.displayUrl,
+      moveAbi:       input.moveAbi,
     });
 
     const latencyMs = Date.now() - startMs;
-    req.log.info({ latencyMs, verdict: verdict.verdict, riskScore: verdict.risk_score }, "AI analysis complete");
+    req.log.info(
+      { latencyMs, verdict: verdict.verdict, riskScore: verdict.risk_score },
+      "AI analysis complete"
+    );
 
-    // Build Walrus blob payload and store asynchronously — don't block the response
     const logPayload = buildThreatLog({
-      objectId: input.objectId,
-      objectType: input.objectType,
+      objectId:      input.objectId,
+      objectType:    input.objectType,
       senderAddress: input.senderAddress,
-      displayName: input.displayName,
-      displayUrl: input.displayUrl,
-      verdict: verdict.verdict,
-      riskScore: verdict.risk_score,
-      reasonCode: verdict.reason_code,
-      confidence: verdict.confidence,
-      flags: verdict.flags,
-      reasoning: verdict.reasoning,
+      displayName:   input.displayName,
+      displayUrl:    input.displayUrl,
+      verdict:       verdict.verdict,
+      riskScore:     verdict.risk_score,
+      reasonCode:    verdict.reason_code,
+      confidence:    verdict.confidence,
+      flags:         verdict.flags,
+      reasoning:     verdict.reasoning,
     });
 
-    // Auto-save if risk_score >= 65
     let savedThreatId: number | null = null;
+
     if (verdict.risk_score >= 65) {
-      // Store to Walrus and DB concurrently
-      const [walrusBlobId, dbResult] = await Promise.all([
+      const [walrusBlobId, threat] = await Promise.all([
         storeThreatLog(logPayload),
-        db
-          .insert(threatsTable)
-          .values({
-            objectId: input.objectId,
-            objectType: input.objectType,
+        prisma.threat.create({
+          data: {
+            objectId:      input.objectId,
+            objectType:    input.objectType,
             senderAddress: input.senderAddress,
-            displayName: input.displayName ?? null,
-            displayUrl: input.displayUrl ?? null,
-            riskScore: verdict.risk_score,
-            verdict: verdict.verdict,
-            reasonCode: verdict.reason_code,
-            confidence: verdict.confidence,
-            flags: verdict.flags,
-            reasoning: verdict.reasoning,
-            status: "quarantined",
-          })
-          .returning({ id: threatsTable.id }),
+            displayName:   input.displayName ?? null,
+            displayUrl:    input.displayUrl   ?? null,
+            riskScore:     verdict.risk_score,
+            verdict:       verdict.verdict,
+            reasonCode:    verdict.reason_code,
+            confidence:    verdict.confidence,
+            flags:         verdict.flags,
+            reasoning:     verdict.reasoning,
+            status:        "quarantined",
+          },
+        }),
       ]);
 
-      savedThreatId = dbResult[0]?.id ?? null;
+      savedThreatId = threat.id;
 
-      // Backfill the walrus blob ID if we got one
-      if (walrusBlobId && savedThreatId) {
-        await db
-          .update(threatsTable)
-          .set({ walrusBlobId })
-          .where(eq(threatsTable.id, savedThreatId));
+      if (walrusBlobId) {
+        await prisma.threat.update({
+          where: { id: savedThreatId },
+          data:  { walrusBlobId },
+        });
       }
     } else {
-      // Low-risk: fire-and-forget Walrus write for audit trail
-      storeThreatLog(logPayload).catch(() => {
-        // non-fatal
-      });
+      storeThreatLog(logPayload).catch(() => {});
     }
 
     res.json({
-      riskScore: verdict.risk_score,
-      verdict: verdict.verdict,
-      reasonCode: verdict.reason_code,
-      confidence: verdict.confidence,
-      flags: verdict.flags,
-      reasoning: verdict.reasoning,
+      riskScore:    verdict.risk_score,
+      verdict:      verdict.verdict,
+      reasonCode:   verdict.reason_code,
+      confidence:   verdict.confidence,
+      flags:        verdict.flags,
+      reasoning:    verdict.reasoning,
       savedThreatId,
       latencyMs,
     });
@@ -151,10 +142,9 @@ router.get("/threats/:id", async (req, res) => {
     return;
   }
 
-  const [threat] = await db
-    .select()
-    .from(threatsTable)
-    .where(eq(threatsTable.id, params.data.id));
+  const threat = await prisma.threat.findUnique({
+    where: { id: params.data.id },
+  });
 
   if (!threat) {
     res.status(404).json({ error: "Threat not found" });
@@ -164,7 +154,7 @@ router.get("/threats/:id", async (req, res) => {
   res.json({
     ...threat,
     detectedAt: threat.detectedAt.toISOString(),
-    updatedAt: threat.updatedAt.toISOString(),
+    updatedAt:  threat.updatedAt.toISOString(),
   });
 });
 
@@ -176,31 +166,25 @@ router.post("/threats/:id/release", async (req, res) => {
     return;
   }
 
-  const [threat] = await db
-    .select()
-    .from(threatsTable)
-    .where(eq(threatsTable.id, params.data.id));
-
-  if (!threat) {
+  const existing = await prisma.threat.findUnique({ where: { id: params.data.id } });
+  if (!existing) {
     res.status(404).json({ error: "Threat not found" });
     return;
   }
-
-  if (threat.status !== "quarantined") {
-    res.status(409).json({ error: `Cannot release asset with status "${threat.status}"` });
+  if (existing.status !== "quarantined") {
+    res.status(409).json({ error: `Cannot release asset with status "${existing.status}"` });
     return;
   }
 
-  const [updated] = await db
-    .update(threatsTable)
-    .set({ status: "released", updatedAt: new Date() })
-    .where(eq(threatsTable.id, params.data.id))
-    .returning();
+  const updated = await prisma.threat.update({
+    where: { id: params.data.id },
+    data:  { status: "released" },
+  });
 
   res.json({
     ...updated,
-    detectedAt: updated!.detectedAt.toISOString(),
-    updatedAt: updated!.updatedAt.toISOString(),
+    detectedAt: updated.detectedAt.toISOString(),
+    updatedAt:  updated.updatedAt.toISOString(),
   });
 });
 
@@ -212,31 +196,25 @@ router.post("/threats/:id/burn", async (req, res) => {
     return;
   }
 
-  const [threat] = await db
-    .select()
-    .from(threatsTable)
-    .where(eq(threatsTable.id, params.data.id));
-
-  if (!threat) {
+  const existing = await prisma.threat.findUnique({ where: { id: params.data.id } });
+  if (!existing) {
     res.status(404).json({ error: "Threat not found" });
     return;
   }
-
-  if (threat.status !== "quarantined") {
-    res.status(409).json({ error: `Cannot burn asset with status "${threat.status}"` });
+  if (existing.status !== "quarantined") {
+    res.status(409).json({ error: `Cannot burn asset with status "${existing.status}"` });
     return;
   }
 
-  const [updated] = await db
-    .update(threatsTable)
-    .set({ status: "burned", updatedAt: new Date() })
-    .where(eq(threatsTable.id, params.data.id))
-    .returning();
+  const updated = await prisma.threat.update({
+    where: { id: params.data.id },
+    data:  { status: "burned" },
+  });
 
   res.json({
     ...updated,
-    detectedAt: updated!.detectedAt.toISOString(),
-    updatedAt: updated!.updatedAt.toISOString(),
+    detectedAt: updated.detectedAt.toISOString(),
+    updatedAt:  updated.updatedAt.toISOString(),
   });
 });
 

@@ -1,17 +1,15 @@
+// artifacts/api-server/src/routes/wallets.ts
 import { Router } from "express";
-import { db } from "@workspace/db";
-import { watchedWalletsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { prisma } from "@workspace/db";
 import { AddWatchedWalletBody, RemoveWatchedWalletParams } from "@workspace/api-zod";
 
 const router = Router();
 
 // GET /monitor/wallets
 router.get("/monitor/wallets", async (_req, res) => {
-  const wallets = await db
-    .select()
-    .from(watchedWalletsTable)
-    .orderBy(watchedWalletsTable.createdAt);
+  const wallets = await prisma.watchedWallet.findMany({
+    orderBy: { createdAt: "asc" },
+  });
 
   res.json(
     wallets.map((w) => ({
@@ -29,18 +27,17 @@ router.post("/monitor/wallets", async (req, res) => {
     return;
   }
 
-  const [wallet] = await db
-    .insert(watchedWalletsTable)
-    .values({
-      address: body.data.address,
-      label: body.data.label,
+  const wallet = await prisma.watchedWallet.create({
+    data: {
+      address:  body.data.address,
+      label:    body.data.label,
       isActive: true,
-    })
-    .returning();
+    },
+  });
 
   res.status(201).json({
     ...wallet,
-    createdAt: wallet!.createdAt.toISOString(),
+    createdAt: wallet.createdAt.toISOString(),
   });
 });
 
@@ -52,15 +49,16 @@ router.delete("/monitor/wallets/:id", async (req, res) => {
     return;
   }
 
-  const [wallet] = await db
-    .delete(watchedWalletsTable)
-    .where(eq(watchedWalletsTable.id, params.data.id))
-    .returning();
-
-  if (!wallet) {
+  // Check it exists first so we can return 404 instead of a Prisma error
+  const existing = await prisma.watchedWallet.findUnique({ where: { id: params.data.id } });
+  if (!existing) {
     res.status(404).json({ error: "Wallet not found" });
     return;
   }
+
+  const wallet = await prisma.watchedWallet.delete({
+    where: { id: params.data.id },
+  });
 
   res.json({
     ...wallet,

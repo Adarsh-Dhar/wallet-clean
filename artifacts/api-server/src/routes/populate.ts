@@ -1,18 +1,7 @@
-/**
- * POST /populate-wallet
- *
- * Seeds a target wallet with 5 synthetic spam/phishing objects for demo and
- * testing purposes. Each object is run through the full AI analysis pipeline
- * (Gemini or mock fallback). High-risk objects are quarantined in the DB,
- * logged to Walrus, and optionally recorded on-chain via the deployed
- * quarantine_vault Move contract.
- */
-
+// artifacts/api-server/src/routes/populate.ts
 import { Router } from "express";
 import { randomBytes } from "crypto";
-import { db } from "@workspace/db";
-import { threatsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { prisma } from "@workspace/db";
 import { analyzeThreat } from "../lib/gemini";
 import { storeThreatLog, buildThreatLog } from "../lib/walrus";
 import { quarantineOnChain, isOnChainEnabled } from "../lib/onchain";
@@ -43,8 +32,7 @@ const SPAM_TEMPLATES: SpamTemplate[] = [
     module: "phishing_kit",
     name: "WalletDrainer",
     displayName: "Official Sui Wallet Connect",
-    // Cyrillic 'і' (U+0456) — Unicode homoglyph attack
-    displayUrl: "https://su\u0456.io/connect",
+    displayUrl: "https://su\u0456.io/connect", // Cyrillic homoglyph
   },
   {
     module: "honeypot_defi",
@@ -54,7 +42,7 @@ const SPAM_TEMPLATES: SpamTemplate[] = [
     moveAbi: JSON.stringify({
       functions: [
         { name: "_drain_all", visibility: "private", params: ["&mut 0x2::coin::Coin<0x2::sui::SUI>"] },
-        { name: "stake_free", visibility: "public", params: ["address"] },
+        { name: "stake_free", visibility: "public",  params: ["address"] },
       ],
     }),
   },
@@ -62,7 +50,6 @@ const SPAM_TEMPLATES: SpamTemplate[] = [
     module: "fake_foundation",
     name: "FounderPass",
     displayName: "Sui Foundation VIP Founder Pass",
-    // Digit-0 homoglyph: f0undation
     displayUrl: "https://sui-f0undation.com/exclusive-nft",
   },
   {
@@ -100,77 +87,73 @@ router.post("/populate-wallet", async (req, res) => {
   );
 
   const injections = SPAM_TEMPLATES.map((tmpl, i) => ({
-    objectId: randomObjectId(),
-    objectType: `${fakePackageId(i)}::${tmpl.module}::${tmpl.name}`,
+    objectId:      randomObjectId(),
+    objectType:    `${fakePackageId(i)}::${tmpl.module}::${tmpl.name}`,
     senderAddress: SPAMMER_ADDRESS,
-    displayName: tmpl.displayName,
-    displayUrl: tmpl.displayUrl,
-    moveAbi: tmpl.moveAbi,
+    displayName:   tmpl.displayName,
+    displayUrl:    tmpl.displayUrl,
+    moveAbi:       tmpl.moveAbi,
   }));
 
-  // Fan out all 5 analyses in parallel — they queue through the Gemini rate limiter
   const settled = await Promise.allSettled(
     injections.map(async (obj) => {
       const verdict = await analyzeThreat({
-        objectId: obj.objectId,
-        objectType: obj.objectType,
+        objectId:      obj.objectId,
+        objectType:    obj.objectType,
         senderAddress: obj.senderAddress,
-        displayName: obj.displayName,
-        displayUrl: obj.displayUrl,
-        moveAbi: obj.moveAbi,
+        displayName:   obj.displayName,
+        displayUrl:    obj.displayUrl,
+        moveAbi:       obj.moveAbi,
       });
 
       const logPayload = buildThreatLog({
-        objectId: obj.objectId,
-        objectType: obj.objectType,
+        objectId:      obj.objectId,
+        objectType:    obj.objectType,
         senderAddress: obj.senderAddress,
-        displayName: obj.displayName ?? null,
-        displayUrl: obj.displayUrl ?? null,
-        verdict: verdict.verdict,
-        riskScore: verdict.risk_score,
-        reasonCode: verdict.reason_code,
-        confidence: verdict.confidence,
-        flags: verdict.flags,
-        reasoning: verdict.reasoning,
+        displayName:   obj.displayName ?? null,
+        displayUrl:    obj.displayUrl  ?? null,
+        verdict:       verdict.verdict,
+        riskScore:     verdict.risk_score,
+        reasonCode:    verdict.reason_code,
+        confidence:    verdict.confidence,
+        flags:         verdict.flags,
+        reasoning:     verdict.reasoning,
       });
 
       let threatId: number | null = null;
       let onChainDigest: string | null = null;
 
       if (verdict.risk_score >= MIN_RISK_SCORE_FOR_QUARANTINE) {
-        // 1. Store to Walrus and DB in parallel
-        const [walrusBlobId, dbResult] = await Promise.all([
+        // Store to Walrus and DB in parallel
+        const [walrusBlobId, threat] = await Promise.all([
           storeThreatLog(logPayload),
-          db
-            .insert(threatsTable)
-            .values({
-              objectId: obj.objectId,
-              objectType: obj.objectType,
+          prisma.threat.create({
+            data: {
+              objectId:      obj.objectId,
+              objectType:    obj.objectType,
               senderAddress: obj.senderAddress,
-              displayName: obj.displayName ?? null,
-              displayUrl: obj.displayUrl ?? null,
-              riskScore: verdict.risk_score,
-              verdict: verdict.verdict,
-              reasonCode: verdict.reason_code,
-              confidence: verdict.confidence,
-              flags: verdict.flags,
-              reasoning: verdict.reasoning,
-              status: "quarantined",
-            })
-            .returning({ id: threatsTable.id }),
+              displayName:   obj.displayName ?? null,
+              displayUrl:    obj.displayUrl  ?? null,
+              riskScore:     verdict.risk_score,
+              verdict:       verdict.verdict,
+              reasonCode:    verdict.reason_code,
+              confidence:    verdict.confidence,
+              flags:         verdict.flags,
+              reasoning:     verdict.reasoning,
+              status:        "quarantined",
+            },
+          }),
         ]);
 
-        threatId = dbResult[0]?.id ?? null;
+        threatId = threat.id;
 
-        // 2. Update DB row with Walrus blob ID
-        if (walrusBlobId && threatId) {
-          await db
-            .update(threatsTable)
-            .set({ walrusBlobId })
-            .where(eq(threatsTable.id, threatId));
+        if (walrusBlobId) {
+          await prisma.threat.update({
+            where: { id: threatId },
+            data:  { walrusBlobId },
+          });
         }
 
-        // 3. Record on-chain via the deployed quarantine_vault contract (non-fatal)
         onChainDigest = await quarantineOnChain({
           objectId:      obj.objectId,
           objectType:    obj.objectType,
@@ -182,26 +165,23 @@ router.post("/populate-wallet", async (req, res) => {
           walrusBlobId:  walrusBlobId ?? "",
         });
 
-        // 4. Persist on-chain digest to DB if we got one
-        if (onChainDigest && threatId) {
-          await db
-            .update(threatsTable)
-            .set({ quarantineTxDigest: onChainDigest })
-            .where(eq(threatsTable.id, threatId))
-            .catch(() => {
-              // Column may not exist yet if migration hasn't run — non-fatal
-            });
+        if (onChainDigest) {
+          await prisma.threat
+            .update({
+              where: { id: threatId },
+              data:  { quarantineTxDigest: onChainDigest },
+            })
+            .catch(() => {}); // non-fatal
         }
       } else {
-        // Fire-and-forget audit log for low-risk objects
         storeThreatLog(logPayload).catch(() => {});
       }
 
       return {
-        objectId: obj.objectId,
-        objectType: obj.objectType,
-        verdict: verdict.verdict as "SAFE" | "SUSPICIOUS" | "MALICIOUS",
-        riskScore: verdict.risk_score,
+        objectId:      obj.objectId,
+        objectType:    obj.objectType,
+        verdict:       verdict.verdict as "SAFE" | "SUSPICIOUS" | "MALICIOUS",
+        riskScore:     verdict.risk_score,
         threatId,
         onChainDigest,
       };
@@ -210,20 +190,15 @@ router.post("/populate-wallet", async (req, res) => {
 
   const threats = settled
     .filter(
-      (
-        r
-      ): r is PromiseFulfilledResult<{
-        objectId: string;
-        objectType: string;
+      (r): r is PromiseFulfilledResult<{
+        objectId: string; objectType: string;
         verdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS";
-        riskScore: number;
-        threatId: number | null;
-        onChainDigest: string | null;
+        riskScore: number; threatId: number | null; onChainDigest: string | null;
       }> => r.status === "fulfilled"
     )
     .map((r) => r.value);
 
-  const quarantined = threats.filter((t) => t.threatId !== null).length;
+  const quarantined    = threats.filter((t) => t.threatId !== null).length;
   const onChainDigests = threats.map((t) => t.onChainDigest).filter(Boolean);
 
   req.log.info(
@@ -232,10 +207,9 @@ router.post("/populate-wallet", async (req, res) => {
   );
 
   res.json({
-    injected: threats.length,
+    injected:      threats.length,
     quarantined,
-    txDigest: callerTxDigest ?? null,
-    // First on-chain digest (or null) for the UI toast
+    txDigest:      callerTxDigest ?? null,
     onChainDigest: onChainDigests[0] ?? null,
     threats,
   });
