@@ -21,6 +21,8 @@
  * Set API_BASE to override: API_BASE=http://localhost:80/api pnpm --filter @workspace/scripts run test:e2e
  */
 
+import "dotenv/config";
+
 const API_BASE = process.env["API_BASE"] ?? "http://localhost:80/api";
 const TIMEOUT_MS = 30_000;
 

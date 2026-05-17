@@ -59,7 +59,7 @@ An autonomous Sui blockchain spam & phishing filter agent. It monitors wallet ad
 ## Gotchas
 
 - Run `pnpm --filter @workspace/api-spec run codegen` after every OpenAPI spec change
-- `pnpm --filter @workspace/db run push` applies schema to dev DB (Replit handles prod on publish)
+ - `pnpm --filter @workspace/db run push` applies schema to dev DB (production deployments handled via CI/CD)
 - The `zod` import in schema files must use `zod/v4`
 - Font: Space Mono (mono) is used throughout for the security terminal aesthetic
 

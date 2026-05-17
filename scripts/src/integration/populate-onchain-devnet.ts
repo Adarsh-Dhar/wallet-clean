@@ -9,6 +9,8 @@ function getArg(flag: string): string | undefined {
 }
 function hasFlag(flag: string): boolean { return args.includes(flag); }
 
+import "dotenv/config";
+
 const API_BASE = getArg("--api") ?? process.env["API_BASE"] ?? "http://localhost:8000/api";
 const TARGET_ADDRESS = getArg("--address") ?? process.env["TARGET_ADDRESS"];
 const SUI_NETWORK = (process.env["SUI_NETWORK"] ?? "devnet") as "devnet" | "testnet" | "testnet" | "mainnet";

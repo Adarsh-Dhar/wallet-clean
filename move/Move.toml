@@ -9,3 +9,9 @@ Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-fram
 [addresses]
 deepclean = "0x0"
 deepclean_spam = "0x0"
+
+[env.devnet]
+addresses = [
+	{ name = "deepclean", addr = "0x0" },
+	{ name = "deepclean_spam", addr = "0x0" },
+]

@@ -14,7 +14,8 @@
     "push":       "prisma db push --schema ./prisma/schema.prisma"
   },
   "dependencies": {
-    "@prisma/client": "^5.22.0"
+    "@prisma/client": "^5.22.0",
+    "dotenv": "^16.1.4"
   },
   "devDependencies": {
     "@types/node": "catalog:",

@@ -219,9 +219,9 @@ if (onChainDigest && threatId) {
 5. Extract Package ID from `objectChanges`
 6. Extract AdminCap ID from `objectChanges`
 7. Export deployer private key via `sui keytool export`
-8. Print the 3 secrets to copy into Replit
+8. Print the 3 secrets to copy into the root `.env`
 
-**Manual fallback** if Python JSON parsing fails on Replit:
+**Manual fallback** if Python JSON parsing fails:
 - Output is saved to `/tmp/deepclean_publish_output.json`
 - Open it and find the object with `type: "published"` → copy `packageId`
 - Find the object with `objectType` containing `quarantine_vault::AdminCap` → copy `objectId`
@@ -242,14 +242,15 @@ pnpm install
 bash deploy_move.sh
 ```
 
-### 3. Set Replit Secrets
-Copy the three lines printed by `deploy_move.sh`:
+### 3. Configure environment
+3. Configure environment
+Copy the three lines printed by `deploy_move.sh` and add them to your root `.env` file:
 - `QUARANTINE_PACKAGE_ID=0x...`
 - `QUARANTINE_ADMIN_CAP_ID=0x...`
 - `AGENT_PRIVATE_KEY=...`
 - `SUI_NETWORK=devnet`
 
-Paste into Replit Secrets. Restart the API server.
+Restart the API server after updating `.env` so the new variables are loaded.
 
 ### 4. Verify
 - Frontend: `/wallets` page should show `ConnectButton` at bottom of sidebar
@@ -273,10 +274,10 @@ Paste into Replit Secrets. Restart the API server.
 ---
 
 ## Troubleshooting
-
-### "onchain.ts" type errors
-- Ensure `@mysten/sui` is installed: `pnpm add @mysten/sui`
-- Ensure `@mysten/dapp-kit` is installed: `pnpm add @mysten/dapp-kit`
+"QUARANTINE_PACKAGE_ID not set"
+- Run `bash deploy_move.sh` first (one-time)
+- Copy the 3 values into your root `.env` file
+- Restart the API server for env changes to take effect
 
 ### `deploy_move.sh` fails at JSON parsing
 - Check if Python 3 is available: `python3 --version`
@@ -285,7 +286,7 @@ Paste into Replit Secrets. Restart the API server.
 
 ### "QUARANTINE_PACKAGE_ID not set"
 - Run `bash deploy_move.sh` first (one-time)
-- Copy the 3 values into Replit Secrets
+- Copy the 3 values into your root `.env` file
 - Restart the API server for env changes to take effect
 
 ### "ConnectButton not rendering"

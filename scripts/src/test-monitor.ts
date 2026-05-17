@@ -9,6 +9,8 @@
  * Override: API_BASE=http://localhost:80/api pnpm --filter @workspace/scripts run test:monitor
  */
 
+import "dotenv/config";
+
 const API_BASE = process.env["API_BASE"] ?? "http://localhost:80/api";
 
 interface TestResult { name: string; passed: boolean; detail?: string }
