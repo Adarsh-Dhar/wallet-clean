@@ -72,13 +72,40 @@ export function getMonitorStatus() {
 }
 
 async function poll(): Promise<void> {
-  const wallets = await prisma.watchedWallet.findMany({
-    where: { isActive: true },
-  });
+  // Try to fetch active wallets with an exponential backoff retry strategy.
+  const wallets = await attemptFindActiveWallets(5, 1000);
+  if (!wallets) {
+    // All retries failed — return and let the periodic interval try again later.
+    return;
+  }
 
   logger.debug({ count: wallets.length }, "Polling wallets");
 
   await Promise.allSettled(wallets.map((w) => pollWallet(w.address)));
+}
+
+async function attemptFindActiveWallets(maxRetries = 5, baseDelayMs = 1000) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const wallets = await prisma.watchedWallet.findMany({ where: { isActive: true } });
+      return wallets;
+    } catch (err: any) {
+      const attemptNum = attempt + 1;
+      const isAuthError = err?.name === "PrismaClientInitializationError" || /Authentication failed/i.test(String(err?.message));
+      logger.warn({ err, attempt: attemptNum }, `Monitor DB query failed (attempt ${attemptNum}/${maxRetries})`);
+
+      // For auth errors, don't keep retrying immediately — but we still backoff to allow transient fixes.
+      const delay = Math.min(baseDelayMs * 2 ** attempt, 30_000);
+      await new Promise((res) => setTimeout(res, delay));
+
+      // If last attempt, log an error and return null to let the interval try again later.
+      if (attemptNum >= maxRetries) {
+        logger.error({ err }, "Monitor DB query failed after retries — will retry on next poll interval");
+        return null;
+      }
+    }
+  }
+  return null;
 }
 
 async function pollWallet(address: string): Promise<void> {

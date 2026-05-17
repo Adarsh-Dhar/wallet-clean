@@ -10,6 +10,7 @@
     "test:monitor": "tsx ./src/test-monitor.ts",
     "test:all": "pnpm run test:monitor && pnpm run test:ai && pnpm run test:e2e",
     "populate": "tsx ./src/populate-wallet.ts",
+    "populate:onchain": "tsx ./src/integration/populate-onchain-devnet.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

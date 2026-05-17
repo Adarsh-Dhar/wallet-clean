@@ -1,0 +1,33 @@
+name: On-chain Integration (Devnet)
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base:
+        description: 'Base API URL (e.g. https://staging.example.com/api)'
+        required: true
+      target_address:
+        description: 'Target wallet address to populate'
+        required: true
+
+jobs:
+  run-integration:
+    runs-on: ubuntu-latest
+    env:
+      SUI_NETWORK: devnet
+      REAL_ONCHAIN: "true"
+      QUARANTINE_PACKAGE_ID: ${{ secrets.QUARANTINE_PACKAGE_ID }}
+      QUARANTINE_ADMIN_CAP_ID: ${{ secrets.QUARANTINE_ADMIN_CAP_ID }}
+      AGENT_PRIVATE_KEY: ${{ secrets.AGENT_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install pnpm
+        run: npm install -g pnpm@8
+      - name: Install dependencies
+        run: pnpm install
+      - name: Run on-chain integration script
+        run: pnpm --filter @workspace/scripts run populate:onchain -- --address ${{ github.event.inputs.target_address }} --api ${{ github.event.inputs.api_base }}

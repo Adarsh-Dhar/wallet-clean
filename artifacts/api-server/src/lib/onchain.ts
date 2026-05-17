@@ -66,6 +66,96 @@ function toBytes(s: string): number[] {
   return Array.from(new TextEncoder().encode(s));
 }
 
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0) throw new Error("Invalid hex string length");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < clean.length; i += 2) {
+    out[i / 2] = parseInt(clean.slice(i, i + 2), 16);
+  }
+  return out;
+}
+
+function tryBase64Decode(s: string): Uint8Array | null {
+  try {
+    const buf = Buffer.from(s, "base64");
+    return new Uint8Array(buf);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse various AGENT_PRIVATE_KEY formats into a Uint8Array secret key.
+ * Supported formats:
+ *  - 0x-prefixed hex string
+ *  - raw hex string
+ *  - base64 encoded bytes
+ *  - JSON blob exported by some key tools (object with `secretKey` array or string)
+ *  - comma-separated decimal byte list
+ */
+function parseAgentPrivateKey(raw: string): Uint8Array | null {
+  if (!raw) return null;
+  const s = raw.trim();
+
+  // Hex (0x or bare)
+  if (/^0x[0-9a-fA-F]+$/.test(s) || /^[0-9a-fA-F]+$/.test(s)) {
+    try {
+      return hexToBytes(s);
+    } catch (e) {
+      logger.warn({ err: e }, "Failed to parse AGENT_PRIVATE_KEY as hex");
+    }
+  }
+
+  // Try JSON
+  if (s.startsWith("{") || s.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(s);
+      // secretKey as array of numbers
+      if (Array.isArray(parsed?.secretKey) && parsed.secretKey.every((n: any) => typeof n === "number")) {
+        return new Uint8Array(parsed.secretKey as number[]);
+      }
+      // some tools export `privateKey` or `secret_key` as base64/hex
+      const candidate = parsed?.privateKey ?? parsed?.secret_key ?? parsed?.secretKeyBase64 ?? parsed?.private_key_base64;
+      if (typeof candidate === "string") {
+        // try base64 then hex
+        const b = tryBase64Decode(candidate);
+        if (b && (b.length === 32 || b.length === 64)) return b;
+        try { return hexToBytes(candidate); } catch {}
+      }
+      // raw array
+      if (Array.isArray(parsed) && parsed.every((n: any) => typeof n === "number")) {
+        return new Uint8Array(parsed as number[]);
+      }
+    } catch (e) {
+      logger.debug({ err: e }, "AGENT_PRIVATE_KEY JSON parse failed — not JSON");
+    }
+  }
+
+  // Comma-separated decimal bytes
+  if (/^[0-9]+(,[0-9]+)+$/.test(s)) {
+    try {
+      const parts = s.split(",").map((p) => Number(p.trim()));
+      if (parts.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+        return new Uint8Array(parts);
+      }
+    } catch (e) {
+      logger.debug({ err: e }, "AGENT_PRIVATE_KEY comma list parse failed");
+    }
+  }
+
+  // Base64 raw
+  const base64 = tryBase64Decode(s);
+  if (base64 && (base64.length === 32 || base64.length === 64)) return base64;
+
+  // If it's a short hex-like string without 0x but odd length, try to decode and warn
+  if (/^[0-9a-fA-F]+$/.test(s)) {
+    try { return hexToBytes(s); } catch {}
+  }
+
+  return null;
+}
+
 /**
  * Submit a PTB to record a quarantine action on-chain.
  *
@@ -84,7 +174,16 @@ export async function quarantineOnChain(
   }
 
   try {
-    const keypair     = Ed25519Keypair.fromSecretKey(AGENT_PRIV_KEY!);
+    const keyBytes = parseAgentPrivateKey(AGENT_PRIV_KEY!);
+    if (!keyBytes) {
+      logger.error(
+        { hint: "AGENT_PRIVATE_KEY accepted formats: 0xhex, hex, base64, JSON{secretKey:[..]}" },
+        "AGENT_PRIVATE_KEY is set but could not be parsed"
+      );
+      return null;
+    }
+
+    const keypair = Ed25519Keypair.fromSecretKey(keyBytes);
     const agentAddress = keypair.getPublicKey().toSuiAddress();
     const client      = getClient();
 

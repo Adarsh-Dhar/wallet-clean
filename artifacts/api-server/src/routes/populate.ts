@@ -191,14 +191,23 @@ router.post("/populate-wallet", async (req, res) => {
     return;
   }
 
+  const REAL_ONCHAIN = (process.env["REAL_ONCHAIN"] ?? "false").toLowerCase() === "true";
+  const SUI_NETWORK = (process.env["SUI_NETWORK"] ?? "testnet") as "testnet" | "mainnet" | "devnet" | "localnet";
+
   req.log.info(
-    { targetAddress, onChainEnabled: isOnChainEnabled(), spamWallet: SPAM_WALLET },
-    "Populating wallet — fetching real spam objects from testnet"
+    { targetAddress, realOnChain: REAL_ONCHAIN, onChainEnabled: isOnChainEnabled(), spamWallet: SPAM_WALLET, network: SUI_NETWORK },
+    "Populating wallet — fetching real spam objects from chain"
   );
 
-  // Connect to testnet where our contracts are deployed
+  if (REAL_ONCHAIN && !isOnChainEnabled()) {
+    req.log.error({ env: Object.keys(process.env) }, "REAL_ONCHAIN requested but on-chain config missing (QUARANTINE_PACKAGE_ID / QUARANTINE_ADMIN_CAP_ID / AGENT_PRIVATE_KEY)");
+    res.status(500).json({ error: "REAL_ONCHAIN=true but on-chain configuration (QUARANTINE_PACKAGE_ID, QUARANTINE_ADMIN_CAP_ID, AGENT_PRIVATE_KEY) is missing" });
+    return;
+  }
+
+  // Connect to the requested Sui network where our contracts are deployed
   type NetworkName = "testnet" | "mainnet" | "devnet" | "localnet";
-  const networkName: NetworkName = "testnet";
+  const networkName: NetworkName = SUI_NETWORK;
   const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl(networkName), network: networkName });
 
   // 1. Fetch REAL spam objects from the deployed testnet wallet
@@ -289,7 +298,9 @@ router.post("/populate-wallet", async (req, res) => {
           await prisma.threat.update({ where: { id: threatId }, data: { walrusBlobId } });
         }
 
-        onChainDigest = await quarantineOnChain({
+        onChainDigest = null;
+        if (REAL_ONCHAIN) {
+          onChainDigest = await quarantineOnChain({
           objectId:      obj.objectId,
           objectType:    obj.objectType,
           senderAddress: obj.senderAddress,
@@ -298,7 +309,8 @@ router.post("/populate-wallet", async (req, res) => {
           reasonCode:    verdict.reason_code,
           confidence:    verdict.confidence,
           walrusBlobId:  walrusBlobId ?? "",
-        });
+          });
+        }
 
         if (onChainDigest) {
           await prisma.threat.update({
