@@ -77,8 +77,12 @@ export const AnalyzeThreatResponse = zod.object({
 /**
  * @summary Get a specific threat by ID
  */
+export const getThreatPathIdMax = 2147483647;
+
+
+
 export const GetThreatParams = zod.object({
-  "id": zod.coerce.number()
+  "id": zod.coerce.number().min(1).max(getThreatPathIdMax)
 })
 
 export const GetThreatResponse = zod.object({
@@ -105,8 +109,12 @@ export const GetThreatResponse = zod.object({
 /**
  * @summary Release a quarantined asset back to owner
  */
+export const releaseThreatPathIdMax = 2147483647;
+
+
+
 export const ReleaseThreatParams = zod.object({
-  "id": zod.coerce.number()
+  "id": zod.coerce.number().min(1).max(releaseThreatPathIdMax)
 })
 
 export const ReleaseThreatResponse = zod.object({
@@ -133,8 +141,12 @@ export const ReleaseThreatResponse = zod.object({
 /**
  * @summary Permanently burn a quarantined malicious asset
  */
+export const burnThreatPathIdMax = 2147483647;
+
+
+
 export const BurnThreatParams = zod.object({
-  "id": zod.coerce.number()
+  "id": zod.coerce.number().min(1).max(burnThreatPathIdMax)
 })
 
 export const BurnThreatResponse = zod.object({
@@ -153,22 +165,8 @@ export const BurnThreatResponse = zod.object({
   "status": zod.enum(['quarantined', 'released', 'burned']),
   "walrusBlobId": zod.string().nullish(),
   "quarantineTxDigest": zod.string().nullish(),
-  "burnTxDigest":  zod.string().nullish(),
-  "onChainBurned": zod.boolean().optional(),
   "detectedAt": zod.string(),
   "updatedAt": zod.string().optional()
-})
-
-export const CleanWalletResponseItem = zod.object({
-  "id":            zod.number(),
-  "objectId":      zod.string(),
-  "burnTxDigest":  zod.string().nullable(),
-})
-
-export const CleanWalletResponse = zod.object({
-  "cleaned":       zod.number(),
-  "onChainBurned": zod.number(),
-  "threats":       zod.array(CleanWalletResponseItem),
 })
 
 
@@ -198,8 +196,12 @@ export const AddWatchedWalletBody = zod.object({
 /**
  * @summary Remove a wallet from monitoring
  */
+export const removeWatchedWalletPathIdMax = 2147483647;
+
+
+
 export const RemoveWatchedWalletParams = zod.object({
-  "id": zod.coerce.number()
+  "id": zod.coerce.number().min(1).max(removeWatchedWalletPathIdMax)
 })
 
 export const RemoveWatchedWalletResponse = zod.object({
@@ -230,6 +232,29 @@ export const PopulateWalletResponse = zod.object({
   "verdict": zod.string(),
   "riskScore": zod.number(),
   "threatId": zod.number().nullish()
+}))
+})
+
+
+/**
+ * @summary Mark selected quarantined threats as burned using a wallet-signed tx digest
+ */
+
+
+
+
+export const CleanWalletBody = zod.object({
+  "threatIds": zod.array(zod.number().min(1)).min(1),
+  "burnTxDigest": zod.string()
+})
+
+export const CleanWalletResponse = zod.object({
+  "cleaned": zod.number(),
+  "onChainBurned": zod.number(),
+  "threats": zod.array(zod.object({
+  "id": zod.number(),
+  "objectId": zod.string(),
+  "burnTxDigest": zod.string().nullable()
 }))
 })
 

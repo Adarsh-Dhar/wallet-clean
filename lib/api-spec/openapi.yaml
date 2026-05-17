@@ -239,6 +239,27 @@ paths:
         "400":
           description: Bad request
 
+  /clean-wallet:
+    post:
+      operationId: cleanWallet
+      tags: [threats]
+      summary: Mark selected quarantined threats as burned using a wallet-signed tx digest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CleanWalletBody"
+      responses:
+        "200":
+          description: Wallet clean completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CleanWalletResponse"
+        "400":
+          description: Bad request
+
   /stats/dashboard:
     get:
       operationId: getDashboardStats
@@ -427,6 +448,43 @@ components:
                 type: integer
               threatId:
                 type: ["integer", "null"]
+
+    CleanWalletBody:
+      type: object
+      required: [threatIds, burnTxDigest]
+      properties:
+        threatIds:
+          type: array
+          minItems: 1
+          items:
+            type: integer
+            minimum: 1
+        burnTxDigest:
+          type: string
+
+    CleanWalletResponseItem:
+      type: object
+      required: [id, objectId, burnTxDigest]
+      properties:
+        id:
+          type: integer
+        objectId:
+          type: string
+        burnTxDigest:
+          type: ["string", "null"]
+
+    CleanWalletResponse:
+      type: object
+      required: [cleaned, onChainBurned, threats]
+      properties:
+        cleaned:
+          type: integer
+        onChainBurned:
+          type: integer
+        threats:
+          type: array
+          items:
+            $ref: "#/components/schemas/CleanWalletResponseItem"
 
     WatchedWallet:
       type: object

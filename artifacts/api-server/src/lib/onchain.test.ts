@@ -137,8 +137,8 @@ describe('onchain.ts - On-Chain Module Tests', () => {
     it('should reject risk scores outside 0-100', () => {
       const invalidScores = [-1, 101, 150, -50];
       invalidScores.forEach((score) => {
-        expect(score).not.toBeGreaterThanOrEqual(0);
-        expect(score).not.toBeLessThanOrEqual(100);
+        // Score is invalid if it is less than 0 OR greater than 100
+        expect(score < 0 || score > 100).toBeTruthy();
       });
     });
 

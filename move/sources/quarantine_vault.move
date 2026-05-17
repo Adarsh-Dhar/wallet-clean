@@ -23,8 +23,6 @@ module deepclean::quarantine_vault {
     // ────────────────────────────────────────────────────────────────────────
     // Errors
     // ────────────────────────────────────────────────────────────────────────
-    const ENotAdmin: u64 = 0;
-    const EAlreadySettled: u64 = 1;
     const ENotQuarantined: u64 = 2;
 
     // ────────────────────────────────────────────────────────────────────────
@@ -180,15 +178,13 @@ module deepclean::quarantine_vault {
         transfer::public_transfer(obj, DEAD_ADDRESS);
     }
 
-    use sui::coin as coin;
-
     /// Merge all dust coins into the primary coin then send the combined
     /// amount to the dead address, effectively removing all dust in one PTB.
     /// `primary` is the coin that absorbs the others; `dusts` is the remainder.
     public entry fun merge_and_send_dust<T>(
         _cap: &AdminCap,
         mut primary: Coin<T>,
-        dusts: vector<Coin<T>>,
+        mut dusts: vector<Coin<T>>,
         _ctx: &mut TxContext,
     ) {
         let mut i = 0;

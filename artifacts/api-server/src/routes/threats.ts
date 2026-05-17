@@ -7,6 +7,7 @@ import {
   GetThreatParams,
   ReleaseThreatParams,
   BurnThreatParams,
+  CleanWalletBody,
 } from "@workspace/api-zod";
 import { analyzeThreat, extractStaticSignals } from "../lib/gemini";
 import { storeThreatLog, buildThreatLog } from "../lib/walrus";
@@ -291,57 +292,56 @@ router.post("/threats/:id/burn", async (req, res) => {
   });
 });
 
-// POST /clean-wallet — AI-confirmed bulk burn of all quarantined threats
+// POST /clean-wallet — wallet-signed bulk burn confirmation
 router.post("/clean-wallet", async (req, res) => {
-  const quarantined = await prisma.threat.findMany({
-    where: { status: "quarantined" },
-  });
-
-  if (quarantined.length === 0) {
-    res.json({ cleaned: 0, threats: [] });
+  const body = CleanWalletBody.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ error: "Invalid request body" });
     return;
   }
 
-  const ids = quarantined.map((t) => t.id);
+  const requestedIds = [...new Set(body.data.threatIds)];
+  const digest = body.data.burnTxDigest;
 
-  // 1. Flip all to burned in DB atomically
-  await prisma.threat.updateMany({
-    where: { id: { in: ids } },
-    data:  { status: "burned" },
+  const quarantined = await prisma.threat.findMany({
+    where: {
+      id: { in: requestedIds },
+      status: "quarantined",
+    },
+    select: {
+      id: true,
+      objectId: true,
+    },
   });
 
-  req.log.info({ count: ids.length }, "AI deep clean — DB records burned");
-
-  // 2. Fire real on-chain disposal for each, sequentially to avoid gas races
-  const results: Array<{ id: number; objectId: string; burnTxDigest: string | null }> = [];
-
-  if (isOnChainEnabled()) {
-    for (const threat of quarantined) {
-      const burnTxDigest = await sendToDeadOnChain({
-        objectId:   threat.objectId,
-        objectType: threat.objectType,
-      }).catch(() => null);
-
-      if (burnTxDigest) {
-        await prisma.threat.update({
-          where: { id: threat.id },
-          data:  { burnTxDigest },
-        }).catch(() => {});
-      }
-
-      results.push({ id: threat.id, objectId: threat.objectId, burnTxDigest });
-    }
-  } else {
-    // On-chain not configured — just record DB-only burns
-    quarantined.forEach((t) =>
-      results.push({ id: t.id, objectId: t.objectId, burnTxDigest: null })
-    );
+  if (quarantined.length === 0) {
+    res.json({ cleaned: 0, onChainBurned: 0, threats: [] });
+    return;
   }
 
+  const idsToUpdate = quarantined.map((t) => t.id);
+
+  await prisma.threat.updateMany({
+    where: {
+      id: { in: idsToUpdate },
+      status: "quarantined",
+    },
+    data: {
+      status: "burned",
+      burnTxDigest: digest,
+    },
+  });
+
+  req.log.info({ count: idsToUpdate.length, digest }, "Wallet-signed deep clean recorded");
+
   res.json({
-    cleaned:      ids.length,
-    onChainBurned: results.filter((r) => r.burnTxDigest !== null).length,
-    threats:      results,
+    cleaned: idsToUpdate.length,
+    onChainBurned: idsToUpdate.length,
+    threats: quarantined.map((t) => ({
+      id: t.id,
+      objectId: t.objectId,
+      burnTxDigest: digest,
+    })),
   });
 });
 

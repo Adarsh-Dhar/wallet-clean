@@ -21,6 +21,8 @@ import type {
 
 import type {
   ActivityEvent,
+  CleanWalletBody,
+  CleanWalletResponse,
   DashboardStats,
   ErrorResponse,
   GetRecentActivityParams,
@@ -784,6 +786,77 @@ export const usePopulateWallet = <TError = ErrorType<void>,
         TContext
       > => {
       return useMutation(getPopulateWalletMutationOptions(options));
+    }
+
+export const getCleanWalletUrl = () => {
+
+
+
+
+  return `/api/clean-wallet`
+}
+
+/**
+ * @summary Mark selected quarantined threats as burned using a wallet-signed tx digest
+ */
+export const cleanWallet = async (cleanWalletBody: CleanWalletBody, options?: RequestInit): Promise<CleanWalletResponse> => {
+
+  return customFetch<CleanWalletResponse>(getCleanWalletUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      cleanWalletBody,)
+  }
+);}
+
+
+
+
+export const getCleanWalletMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof cleanWallet>>, TError,{data: BodyType<CleanWalletBody>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof cleanWallet>>, TError,{data: BodyType<CleanWalletBody>}, TContext> => {
+
+const mutationKey = ['cleanWallet'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof cleanWallet>>, {data: BodyType<CleanWalletBody>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  cleanWallet(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CleanWalletMutationResult = NonNullable<Awaited<ReturnType<typeof cleanWallet>>>
+    export type CleanWalletMutationBody = BodyType<CleanWalletBody>
+    export type CleanWalletMutationError = ErrorType<void>
+
+    /**
+ * @summary Mark selected quarantined threats as burned using a wallet-signed tx digest
+ */
+export const useCleanWallet = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof cleanWallet>>, TError,{data: BodyType<CleanWalletBody>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof cleanWallet>>,
+        TError,
+        {data: BodyType<CleanWalletBody>},
+        TContext
+      > => {
+      return useMutation(getCleanWalletMutationOptions(options));
     }
 
 export const getGetDashboardStatsUrl = () => {

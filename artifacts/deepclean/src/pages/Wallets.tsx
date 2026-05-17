@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
+import { Transaction } from "@mysten/sui/transactions";
 import {
   useListWatchedWallets,
   useAddWatchedWallet,
@@ -19,7 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { walletSchema, type WalletFormValues } from "@/lib/schemas";
 import {
   Trash2, Plus, Wallet, AlertTriangle, Zap,
-  CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, X,
+  CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, X, Lock,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -52,7 +53,14 @@ interface PopulateResult {
 
 interface CleanResult {
   cleaned: number;
-  threats: number[];
+  threats: Array<{ id: number; objectId: string; burnTxDigest: string | null }>;
+}
+
+interface QuarantinedThreat {
+  id: number;
+  objectId: string;
+  objectType: string;
+  senderAddress: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -96,9 +104,11 @@ async function populateWalletApi(targetAddress: string): Promise<PopulateResult>
   return res.json() as Promise<PopulateResult>;
 }
 
-async function cleanWalletApi(): Promise<CleanResult> {
+async function cleanWalletApi(threatIds: number[], burnTxDigest: string): Promise<CleanResult> {
   const res = await fetch(new URL("/api/clean-wallet", API_BASE).toString(), {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threatIds, burnTxDigest }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json() as Promise<CleanResult>;
@@ -195,6 +205,7 @@ export default function Wallets() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const account = useCurrentAccount();
+  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
 
   const [populatingId, setPopulatingId] = useState<number | null>(null);
   const [cleaningId, setCleaningId] = useState<number | null>(null);
@@ -347,36 +358,70 @@ export default function Wallets() {
     },
   });
 
-  async function performDeepClean(walletId: number) {
-    appendSeedLog(walletId, mkLog("info", "  Cleaning quarantined threats…"));
-    try {
-      const cleanResult = await cleanWalletApi();
+  async function performDeepClean(walletId: number, walletAddress: string) {
+    appendSeedLog(walletId, mkLog("info", "  Fetching quarantined threats from DB…"));
 
-      if (!cleanResult || (cleanResult.cleaned === 0 && (!cleanResult.threats || cleanResult.threats.length === 0))) {
-        appendSeedLog(walletId, mkLog("info", "No quarantined threats to clean"));
-        appendSeedLog(walletId, mkLog("success", `✓ Deep clean complete — 0 threats burned`));
-        return true;
-      }
+    const threatsRes = await fetch(
+      new URL("/api/threats?status=quarantined&limit=200", API_BASE).toString(),
+    );
+    if (!threatsRes.ok) {
+      throw new Error(`Failed to fetch threats: HTTP ${threatsRes.status}`);
+    }
 
-      // Log each cleaned threat entry into the same seed log
-      if (Array.isArray(cleanResult.threats) && cleanResult.threats.length > 0) {
-        cleanResult.threats.forEach((threatId, i) => {
-          appendSeedLog(walletId, mkLog("success", `  [${i + 1}] Threat #${threatId} → status: burned`));
-        });
-      }
+    const allThreats = await threatsRes.json() as QuarantinedThreat[];
+    const normalizedAddress = walletAddress.toLowerCase();
+    const threats = allThreats.filter((threat) => threat.senderAddress.toLowerCase() === normalizedAddress);
 
-      appendSeedLog(walletId, mkLog("success", `✓ Deep clean complete — ${cleanResult.cleaned} threats burned`));
+    if (threats.length === 0) {
+      appendSeedLog(walletId, mkLog("info", "No quarantined threats to clean"));
+      appendSeedLog(walletId, mkLog("success", "✓ Deep clean complete — 0 threats burned"));
       return true;
-    } catch (cleanError) {
-      appendSeedLog(walletId, mkLog("error", "✗ Deep clean failed"));
-      appendSeedLog(walletId, mkLog("error", String(cleanError)));
-      toast({
-        title: "Deep clean failed",
-        description: String(cleanError),
-        variant: "destructive",
+    }
+
+    appendSeedLog(walletId, mkLog("info", `  Found ${threats.length} quarantined objects`));
+    appendSeedLog(walletId, mkLog("info", "  Building PTB — transferring spam objects to dead address…"));
+
+    const tx = new Transaction();
+    tx.transferObjects(
+      threats.map((threat) => tx.object(threat.objectId)),
+      "0x0000000000000000000000000000000000000000000000000000000000000000",
+    );
+
+    appendSeedLog(walletId, mkLog("info", "  Wallet popup opening — please approve the transaction…"));
+
+    let digest: string;
+    try {
+      const result = await signAndExecute({
+        // dapp-kit resolves a different @mysten/sui version in this monorepo,
+        // so we bridge the transaction type at compile time.
+        transaction: tx as unknown as Parameters<typeof signAndExecute>[0]["transaction"],
       });
+      digest = result.digest;
+    } catch (err) {
+      appendSeedLog(walletId, mkLog("error", "✗ User rejected or transaction failed"));
+      appendSeedLog(walletId, mkLog("error", String(err)));
       return false;
     }
+
+    appendSeedLog(walletId, mkLog("success", "✓ On-chain tx confirmed"));
+    appendSeedLog(walletId, mkLog("success", "  digest", digest));
+
+    const cleanResult = await cleanWalletApi(
+      threats.map((threat) => threat.id),
+      digest,
+    );
+
+    if (!cleanResult || (cleanResult.cleaned === 0 && (!cleanResult.threats || cleanResult.threats.length === 0))) {
+      appendSeedLog(walletId, mkLog("warn", "No DB records updated after signed transaction"));
+      return true;
+    }
+
+    cleanResult.threats.forEach((threat, i) => {
+      appendSeedLog(walletId, mkLog("success", `  [${i + 1}] Threat #${threat.id} → burned`, `       ${threat.objectId}`));
+    });
+
+    appendSeedLog(walletId, mkLog("success", `✓ Deep clean complete — ${cleanResult.cleaned} threats burned`));
+    return true;
   }
 
   async function handleClean(wallet: WalletRow) {
@@ -387,13 +432,19 @@ export default function Wallets() {
     setCleaningId(walletId);
     appendSeedLog(walletId, mkLog("info", `Target: ${wallet.address}`));
 
-    const success = await performDeepClean(walletId);
-
-    setCleaningId(null);
-    if (success) {
-      queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
-      queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
-      toast({ title: `Deep clean finished`, description: `${wallet.label} cleaned` });
+    try {
+      const success = await performDeepClean(walletId, wallet.address);
+      if (success) {
+        queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+        queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
+        toast({ title: "Deep clean finished", description: `${wallet.label} cleaned` });
+      }
+    } catch (err) {
+      appendSeedLog(walletId, mkLog("error", "✗ Deep clean failed"));
+      appendSeedLog(walletId, mkLog("error", String(err)));
+      toast({ title: "Deep clean failed", description: String(err), variant: "destructive" });
+    } finally {
+      setCleaningId(null);
     }
   }
 
@@ -584,7 +635,7 @@ export default function Wallets() {
                     <span className="text-sm font-semibold text-foreground" data-testid={`text-wallet-label-${wallet.id}`}>
                       {wallet.label}
                     </span>
-                    {account?.address === wallet.address && (
+                    {account?.address?.toLowerCase() === wallet.address.toLowerCase() && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400 font-semibold">
                         Connected
                       </span>
@@ -641,19 +692,27 @@ export default function Wallets() {
                 </Button>
 
                 {/* Clean button (per-wallet) */}
+                {(() => {
+                  const isConnectedWallet = account?.address?.toLowerCase() === wallet.address.toLowerCase();
+                  return (
                 <Button
                   variant="ghost"
                   size="sm"
                   className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-rose-400 hover:bg-rose-500/10 shrink-0"
                   onClick={() => handleClean(wallet)}
-                  disabled={populatingId === wallet.id || cleaningId === wallet.id}
-                  title="Clean quarantined threats for this wallet"
+                  disabled={!isConnectedWallet || populatingId === wallet.id || cleaningId === wallet.id}
+                  title={isConnectedWallet ? "Clean quarantined threats" : "Connect this wallet to clean it"}
                   data-testid={`button-clean-wallet-${wallet.id}`}
                 >
                   {cleaningId === wallet.id ? (
                     <>
                       <Loader2 className="w-3 h-3 animate-spin" />
                       <span className="hidden sm:inline">Cleaning…</span>
+                    </>
+                  ) : !isConnectedWallet ? (
+                    <>
+                      <Lock className="w-3 h-3" />
+                      <span className="hidden sm:inline">Connect to clean</span>
                     </>
                   ) : (
                     <>
@@ -662,6 +721,8 @@ export default function Wallets() {
                     </>
                   )}
                 </Button>
+                  );
+                })()}
 
                 {/* Remove button */}
                 <Button

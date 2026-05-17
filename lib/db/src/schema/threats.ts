@@ -17,6 +17,7 @@ export const threatsTable = pgTable("threats", {
   reasoning: text("reasoning").notNull(),
   status: text("status").notNull().default("quarantined"), // quarantined | released | burned
   walrusBlobId: text("walrus_blob_id"),
+  burnTxDigest: text("burn_tx_digest"),
   quarantineTxDigest: text("quarantine_tx_digest"),
   detectedAt: timestamp("detected_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

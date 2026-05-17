@@ -8,6 +8,9 @@
 
 export * from './activityEvent';
 export * from './activityEventType';
+export * from './cleanWalletBody';
+export * from './cleanWalletResponse';
+export * from './cleanWalletResponseItem';
 export * from './dashboardStats';
 export * from './errorResponse';
 export * from './getRecentActivityParams';

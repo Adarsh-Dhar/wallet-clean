@@ -116,6 +116,25 @@ export interface PopulateWalletResult {
   threats: PopulateWalletResultThreatsItem[];
 }
 
+export interface CleanWalletBody {
+  /** @minItems 1 */
+  threatIds: number[];
+  burnTxDigest: string;
+}
+
+export interface CleanWalletResponseItem {
+  id: number;
+  objectId: string;
+  /** @nullable */
+  burnTxDigest: string | null;
+}
+
+export interface CleanWalletResponse {
+  cleaned: number;
+  onChainBurned: number;
+  threats: CleanWalletResponseItem[];
+}
+
 export interface WatchedWallet {
   id: number;
   address: string;
