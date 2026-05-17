@@ -32,9 +32,22 @@ sleep 3
 
 # ── Step 4: Build and publish ─────────────────────────────────────────────────
 echo "→ Publishing move/ package to devnet…"
-PUBLISH_OUTPUT=$(sui client publish move/ \
-  --gas-budget 100000000 \
-  --json 2>&1)
+# Try normal publish; if it fails because Move.toml has no 'devnet' environment,
+# fall back to `sui client test-publish` which allows temporary publishes to devnet.
+PUBLISH_OUTPUT=""
+if PUBLISH_OUTPUT=$(sui client publish move/ --gas-budget 100000000 --json 2>&1); then
+  echo "(publish succeeded)"
+else
+  echo "(publish failed — attempting test-publish for devnet)..."
+  if PUBLISH_OUTPUT=$(sui client test-publish move/ --gas-budget 100000000 --json 2>&1); then
+    echo "(test-publish succeeded)"
+  else
+    echo "(both publish and test-publish failed)"
+    echo "$PUBLISH_OUTPUT" > /tmp/deepclean_publish_output.json
+    echo "See /tmp/deepclean_publish_output.json for details. Exiting." >&2
+    exit 1
+  fi
+fi
 
 echo "$PUBLISH_OUTPUT" > /tmp/deepclean_publish_output.json
 

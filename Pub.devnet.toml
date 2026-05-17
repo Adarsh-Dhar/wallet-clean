@@ -7,9 +7,9 @@ chain-id = "8e04f6e7"
 
 [[published]]
 source = { local = "/Users/adarsh/Documents/Gemini-Vision-API/move" }
-published-at = "0x64e7c95a53c8276c1caf8fbc403cd67645ecbd67f8bf992e440bc5fc0a3d8c83"
-original-id = "0x64e7c95a53c8276c1caf8fbc403cd67645ecbd67f8bf992e440bc5fc0a3d8c83"
+published-at = "0x83e581f28f0def1c272aba55918ad325fbdb4c23980b8bae6ea84e9212bc2939"
+original-id = "0x83e581f28f0def1c272aba55918ad325fbdb4c23980b8bae6ea84e9212bc2939"
 version = 1
 toolchain-version = "1.72.1"
 build-config = { flavor = "sui", edition = "2024" }
-upgrade-capability = "0x42b9a58a562537d9ae983bc5d437d33620ba7623120f1d29ab3ece571c9e9b05"
+upgrade-capability = "0x835a9c1825a3cc37a21fded970f0334173ed35b0d5dfe54219e9e3ba72a8c6d2"
