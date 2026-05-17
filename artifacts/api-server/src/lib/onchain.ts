@@ -17,7 +17,6 @@ import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction } from "@mysten/sui/transactions";
 // In @mysten/sui v2.x, SuiClient is SuiJsonRpcClient and lives in @mysten/sui/jsonRpc
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
-import type { SuiClientTypes } from "@mysten/sui/client";
 import { logger } from "./logger";
 
 const PACKAGE_ID     = process.env["QUARANTINE_PACKAGE_ID"];
