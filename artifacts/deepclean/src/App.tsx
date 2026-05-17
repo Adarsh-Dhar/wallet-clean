@@ -7,6 +7,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Layout from "@/components/Layout";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { AuthProvider } from "@/components/AuthProvider";
 import Dashboard from "@/pages/Dashboard";
 import Threats from "@/pages/Threats";
 import ThreatDetail from "@/pages/ThreatDetail";
@@ -53,12 +54,14 @@ function App() {
       <SuiClientProvider networks={networks} defaultNetwork="testnet">
         {/* autoConnect re-connects the last wallet on page load */}
         <WalletProvider autoConnect>
-          <TooltipProvider>
-            <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-              <Router />
-            </WouterRouter>
-            <Toaster />
-          </TooltipProvider>
+          <AuthProvider>
+            <TooltipProvider>
+              <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+                <Router />
+              </WouterRouter>
+              <Toaster />
+            </TooltipProvider>
+          </AuthProvider>
         </WalletProvider>
       </SuiClientProvider>
     </QueryClientProvider>

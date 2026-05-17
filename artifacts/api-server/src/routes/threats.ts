@@ -24,7 +24,8 @@ router.get("/threats", async (req, res) => {
     return;
   }
 
-  const { verdict, status, walletAddress, limit = 50, offset = 0 } = query.data;
+  const queryData = query.data as typeof query.data & { walletAddress?: string };
+  const { verdict, status, walletAddress, limit = 50, offset = 0 } = queryData;
 
   const threats = await prisma.threat.findMany({
     where: {

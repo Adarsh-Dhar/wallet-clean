@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { walletSchema, type WalletFormValues } from "@/lib/schemas";
+import { apiJson } from "@/lib/auth";
 import {
   Trash2, Plus, Wallet, AlertTriangle, Zap,
   CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, X, Lock,
@@ -66,8 +67,6 @@ interface QuarantinedThreat {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const LOCAL_WALLETS_KEY = "deepclean.localWatchedWallets";
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8080";
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function readLocalWallets(): WalletRow[] {
@@ -95,23 +94,17 @@ function mkLog(level: LogLevel, message: string, detail?: string): LogEntry {
 }
 
 async function populateWalletApi(targetAddress: string): Promise<PopulateResult> {
-  const res = await fetch(new URL("/api/populate-wallet", API_BASE).toString(), {
+  return apiJson<PopulateResult>("/api/populate-wallet", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ targetAddress }),
+    body: { targetAddress },
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<PopulateResult>;
 }
 
 async function cleanWalletApi(threatIds: number[], burnTxDigest: string): Promise<CleanResult> {
-  const res = await fetch(new URL("/api/clean-wallet", API_BASE).toString(), {
+  return apiJson<CleanResult>("/api/clean-wallet", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ threatIds, burnTxDigest }),
+    body: { threatIds, burnTxDigest },
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<CleanResult>;
 }
 
 // ─── Log panel colours ────────────────────────────────────────────────────────
@@ -361,14 +354,9 @@ export default function Wallets() {
   async function performDeepClean(walletId: number, walletAddress: string) {
     appendSeedLog(walletId, mkLog("info", "  Fetching quarantined threats from DB for wallet…"));
 
-    const threatsRes = await fetch(
-      new URL(`/api/threats?status=quarantined&limit=200&walletAddress=${encodeURIComponent(walletAddress)}`, API_BASE).toString(),
+    const threats = await apiJson<QuarantinedThreat[]>(
+      `/api/threats?status=quarantined&limit=200&walletAddress=${encodeURIComponent(walletAddress)}`,
     );
-    if (!threatsRes.ok) {
-      throw new Error(`Failed to fetch threats: HTTP ${threatsRes.status}`);
-    }
-
-    const threats = await threatsRes.json() as QuarantinedThreat[];
 
     if (threats.length === 0) {
       appendSeedLog(walletId, mkLog("info", "No quarantined threats to clean"));
