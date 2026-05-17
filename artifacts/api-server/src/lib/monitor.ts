@@ -2,12 +2,13 @@
 import { prisma } from "@workspace/db";
 import { analyzeThreat } from "./gemini";
 import { storeThreatLog, buildThreatLog } from "./walrus";
+import { quarantineOnChain, isOnChainEnabled } from "./onchain";
 import { logger } from "./logger";
 import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
+import { MIN_RISK_SCORE_FOR_QUARANTINE } from "./constants";
 
 const SUI_NETWORK      = process.env["SUI_NETWORK"]             ?? "testnet";
 const POLL_INTERVAL_MS = Number(process.env["MONITOR_POLL_INTERVAL_MS"] ?? 30_000);
-const MIN_RISK_SCORE_FOR_QUARANTINE = 65;
 const SEEN_OBJECTS_TTL_MS = 10 * 60_000;
 
 const SUI_RPC_URLS: Record<string, string> = {
@@ -168,7 +169,9 @@ async function analyzeAndStore(
       reasoning:  verdict.reasoning,
     });
 
-    if (verdict.risk_score >= MIN_RISK_SCORE_FOR_QUARANTINE) {
+    // BUG FIX #1: Check verdict type AND high score threshold before quarantining
+    // Requires BOTH conditions: (1) explicitly MALICIOUS AND (2) score >= 75
+    if (verdict.verdict === "MALICIOUS" && verdict.risk_score >= 75) {
       const [walrusBlobId, inserted] = await Promise.all([
         storeThreatLog(logPayload),
         prisma.threat.create({
@@ -190,6 +193,29 @@ async function analyzeAndStore(
         await prisma.threat.update({
           where: { id: inserted.id },
           data:  { walrusBlobId },
+        });
+      }
+
+      // BUG FIX #4: Add Sui integration — record quarantine on-chain
+      if (isOnChainEnabled()) {
+        quarantineOnChain({
+          objectId,
+          objectType,
+          senderAddress,
+          riskScore: verdict.risk_score,
+          verdict: verdict.verdict,
+          reasonCode: verdict.reason_code,
+          confidence: verdict.confidence,
+          walrusBlobId: walrusBlobId ?? "",
+        }).then((digest) => {
+          if (digest) {
+            prisma.threat.update({
+              where: { id: inserted.id },
+              data: { quarantineTxDigest: digest },
+            }).catch(() => {});
+          }
+        }).catch((err) => {
+          logger.warn({ err, objectId }, "On-chain quarantine failed (non-blocking)");
         });
       }
 

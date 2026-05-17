@@ -10,6 +10,8 @@ import {
 } from "@workspace/api-zod";
 import { analyzeThreat, extractStaticSignals } from "../lib/gemini";
 import { storeThreatLog, buildThreatLog } from "../lib/walrus";
+import { quarantineOnChain, isOnChainEnabled } from "../lib/onchain";
+import { MIN_RISK_SCORE_FOR_QUARANTINE } from "../lib/constants";
 
 const router = Router();
 
@@ -88,7 +90,10 @@ router.post("/threats/analyze", async (req, res) => {
 
     let savedThreatId: number | null = null;
 
-    if (verdict.risk_score >= 65) {
+    // BUG FIX #1: Check verdict type AND high score threshold before quarantining
+    // Requires BOTH conditions: (1) explicitly MALICIOUS AND (2) score >= 75
+    // Prevents false positives where SAFE objects might have borderline scores
+    if (verdict.verdict === "MALICIOUS" && verdict.risk_score >= 75) {
       const [walrusBlobId, threat] = await Promise.all([
         storeThreatLog(logPayload),
         prisma.threat.create({
@@ -115,6 +120,22 @@ router.post("/threats/analyze", async (req, res) => {
         await prisma.threat.update({
           where: { id: savedThreatId },
           data:  { walrusBlobId },
+        });
+      }
+
+      // BUG FIX #4: Add Sui integration — record quarantine on-chain
+      if (isOnChainEnabled()) {
+        quarantineOnChain({
+          objectId:      input.objectId,
+          objectType:    input.objectType,
+          senderAddress: input.senderAddress,
+          riskScore:     verdict.risk_score,
+          verdict:       verdict.verdict,
+          reasonCode:    verdict.reason_code,
+          confidence:    verdict.confidence,
+          walrusBlobId:  walrusBlobId ?? "",
+        }).catch((err) => {
+          req.log.warn({ err, objectId: input.objectId }, "On-chain quarantine failed (non-blocking)");
         });
       }
     } else {

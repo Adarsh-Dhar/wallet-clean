@@ -5,10 +5,9 @@ import { prisma } from "@workspace/db";
 import { analyzeThreatBatch } from "../lib/gemini";
 import { storeThreatLog, buildThreatLog } from "../lib/walrus";
 import { quarantineOnChain, isOnChainEnabled } from "../lib/onchain";
+import { MIN_RISK_SCORE_FOR_QUARANTINE } from "../lib/constants";
 
 const router = Router();
-
-const MIN_RISK_SCORE_FOR_QUARANTINE = 65;
 
 // The wallet address that holds the real deployed spam objects on testnet
 const SPAM_WALLET =
@@ -261,7 +260,9 @@ router.post("/populate-wallet", async (req, res) => {
       let threatId: number | null = null;
       let onChainDigest: string | null = null;
 
-      if (verdict.risk_score >= MIN_RISK_SCORE_FOR_QUARANTINE) {
+      // BUG FIX #1: Check verdict type AND high score threshold before quarantining
+      // Requires BOTH conditions: (1) explicitly MALICIOUS AND (2) score >= 75
+      if (verdict.verdict === "MALICIOUS" && verdict.risk_score >= 75) {
         const [walrusBlobId, threat] = await Promise.all([
           storeThreatLog(logPayload),
           prisma.threat.create({

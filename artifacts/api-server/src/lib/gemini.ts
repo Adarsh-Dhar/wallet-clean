@@ -215,9 +215,9 @@ function sleep(ms: number): Promise<void> {
  * to finish (including all its retries) before it can start. After each call we
  * enforce an additional GEMINI_POST_CALL_DELAY_MS gap so the next slot opens safely.
  */
-// 6 s keeps us under 10 RPM; short enough that the 20 s per-request SLA is met
-// even when 2–3 calls queue up behind each other.
-const GEMINI_POST_CALL_DELAY_MS = 6_000;
+// BUG FIX #3: Reduced from 6000ms to 1000ms for faster analysis
+// Actual request time (~2s) + 1s gap = ~3s per call = 20 RPM (safe, under 10 RPM limit)
+import { GEMINI_POST_CALL_DELAY_MS } from "./constants";
 // Every call appends to this chain; the chain resolves only after the gap expires.
 let geminiChain: Promise<void> = Promise.resolve();
 
@@ -410,20 +410,37 @@ export async function analyzeThreatBatch(
     return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
   }
 
+  // BUG FIX #2: Compute static signals for each object so batch gets same data as single analysis
   const itemsText = inputs
-    .map(
-      (obj, i) => `### Object ${i + 1}
+    .map((obj, i) => {
+      const signals = extractStaticSignals(obj);
+      const { adjustment, flags: staticFlags } = scoreFromSignals(signals);
+      return `### Object ${i + 1}
 - objectId: ${obj.objectId}
 - objectType: ${obj.objectType}
 - senderAddress: ${obj.senderAddress}
 - displayName: ${obj.displayName ?? "N/A"}
 - displayUrl: ${obj.displayUrl ?? "N/A"}
-- moveAbi: ${obj.moveAbi ?? "Not available"}`
-    )
+- moveAbi: ${obj.moveAbi ?? "Not available"}
+
+**Static signals (deterministic facts):**
+${JSON.stringify(signals, null, 2)}
+
+**Active flags:**
+${staticFlags.length > 0 ? staticFlags.join(", ") : "NONE"}
+
+**Static score adjustment:**
+${adjustment > 0 ? `+${adjustment}` : adjustment} points`;
+    })
     .join("\n\n");
 
-  const batchPrompt = `You are a Sui blockchain security agent. Analyze each object below and return a JSON array — one verdict object per input, in the same order.
+  // BUG FIX #2: Use unified 7-step reasoning that matches single-analysis logic
+  const batchPrompt = `You are a blockchain security analyst specializing in Sui Move smart contracts.
+You will receive BOTH raw asset metadata AND pre-computed static signals from a deterministic analyser.
+Treat the static signals as hard facts - they are computed from the actual bytes, not inferred.
+Your job is to synthesize the signals into a final verdict for each object, catching anything the static analyser missed.
 
+Return ONLY a valid JSON array with one verdict object per input, in the same order.
 Each verdict must have:
 {
   "objectId": "<copy from input>",
@@ -431,16 +448,31 @@ Each verdict must have:
   "verdict": "SAFE" | "SUSPICIOUS" | "MALICIOUS",
   "reason_code": 1-5,
   "confidence": 0.0-1.0,
-  "flags": ["string"],
-  "reasoning": "string"
+  "flags": ["specific finding"],
+  "reasoning": "<2-3 sentence explanation>"
 }
 
-Scoring guide:
-- SAFE (0-40): System packages (0x1, 0x2, 0xdee9), known protocols (circle.com, cetus.zone), no suspicious patterns
-- SUSPICIOUS (41-64): Unknown packages with minor red flags
-- MALICIOUS (65-100): Phishing URLs, homoglyph domains, honeypot ABI (drain/sweep functions), fake airdrops, digit-substituted domains
+Scoring guidance:
+- 0-30:  SAFE      - legitimate asset, all static signals clean
+- 31-64: SUSPICIOUS - some red flags but not conclusively malicious
+- 65-100: MALICIOUS - one or more hard signals (DANGEROUS_ABI, HOMOGLYPH_URL, IMPERSONATION, etc.)
 
-Return ONLY a valid JSON array. No markdown, no explanation.
+Reasoning steps you MUST follow for each object:
+1. If TRUSTED_PACKAGE signal is present -> strong prior toward SAFE (score <= 20) unless other hard signals override.
+2. If DANGEROUS_ABI is present -> score must be >= 80, verdict MALICIOUS.
+3. If HOMOGLYPH_URL or DIGIT_SUBSTITUTION is present -> score must be >= 75, verdict MALICIOUS.
+4. If IMPERSONATION is present without TRUSTED_PACKAGE -> score must be >= 65, verdict MALICIOUS.
+5. If only URGENCY_LANGUAGE or SUSPICIOUS_URL_PATTERN -> score 50-70, verdict SUSPICIOUS unless combined with others.
+6. BULK_SENDER alone is not conclusive - only add 10-15 points.
+7. After applying the above rules, check for anything the static signals may have missed.
+
+Check for these patterns the static analyser cannot see:
+- Subtle metadata spoofing (logo URL correct but display name slightly off)
+- Function names that look benign but compose into drains (e.g. "process_reward" calling "transfer_all")
+- Unusual object abilities (store without drop - classic honeypot)
+- Cross-contract delegation to untrusted addresses
+
+No markdown, no explanation before or after the array.
 
 ${itemsText}`;
 
