@@ -1,6 +1,6 @@
 // artifacts/api-server/src/routes/populate.ts
 import { Router } from "express";
-import { randomBytes } from "crypto";
+import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { prisma } from "@workspace/db";
 import { analyzeThreatBatch } from "../lib/gemini";
 import { storeThreatLog, buildThreatLog } from "../lib/walrus";
@@ -10,110 +10,174 @@ const router = Router();
 
 const MIN_RISK_SCORE_FOR_QUARANTINE = 65;
 
+// The wallet address that holds the real deployed spam objects on testnet
+const SPAM_WALLET =
+  process.env["SPAM_WALLET_ADDRESS"] ??
+  "0x4f6a49a13da2bf444278408265c5bac6b49fab206b030663fba4167819666f32";
+
+// Your deployed package ID from `sui client publish`
+const SPAM_PACKAGE_ID =
+  process.env["QUARANTINE_PACKAGE_ID"] ??
+  "0xe933d9d3e69b29d0183ffbcecaacf7ec8dbc3832f99815760f0d34913c2c1ca4";
+
+// The dust-sending throwaway address
 const SPAMMER_ADDRESS =
-  "0x" + "badc0ffee00000000000000000000000000000000000000000000000000000001".slice(-64);
+  "0x8cb08623b2514d8e90994ac4800d5c05d01775dfec7e324150be638b74e9932e";
 
-interface SpamTemplate {
-  module: string;
-  name: string;
-  displayName: string;
-  displayUrl: string;
-  moveAbi?: string;
-}
-
-const SPAM_TEMPLATES: SpamTemplate[] = [
-  // -- Existing 5 --
-  {
-    module: "scam_airdrop",
-    name: "FreeToken",
-    displayName: "FREE 5000 SUI — Exclusive Airdrop",
-    displayUrl: "https://free-sui-tokens.xyz/airdrop/claim",
+// Metadata we know about each deployed module — used to enrich objects
+// fetched from the chain with display names and URLs (since display objects
+// are separate on-chain and not always returned by getOwnedObjects)
+const KNOWN_OBJECT_META: Record<string, { displayName: string; displayUrl: string; moveAbi?: string }> = {
+  [`${SPAM_PACKAGE_ID}::malicious_airdrop::AirdropToken`]: {
+    displayName: "5000 SUI Airdrop — Claim Expires in 24h",
+    displayUrl:  "https://sui-airdrop-2026.xyz/claim",
   },
-  {
-    module: "phishing_kit",
-    name: "WalletDrainer",
-    displayName: "Official Sui Wallet Connect",
-    displayUrl: "https://su\u0456.io/connect", // Cyrillic i
-  },
-  {
-    module: "honeypot_defi",
-    name: "HoneypotToken",
-    displayName: "SuiGold — 10\u00d7 APY DeFi Protocol",
-    displayUrl: "https://suigold-defi.xyz/stake",
-    moveAbi: JSON.stringify({
-      functions: [
-        { name: "_drain_all", visibility: "private", params: ["&mut 0x2::coin::Coin<0x2::sui::SUI>"] },
-        { name: "stake_free", visibility: "public",  params: ["address"] },
-      ],
-    }),
-  },
-  {
-    module: "fake_foundation",
-    name: "FounderPass",
+  [`${SPAM_PACKAGE_ID}::fake_foundation_nft::FounderPass`]: {
     displayName: "Sui Foundation VIP Founder Pass",
-    displayUrl: "https://sui-f0undation.com/exclusive-nft", // digit substitution
+    displayUrl:  "https://su\u0456.io/founder-claim",  // Cyrillic і — real homoglyph
   },
-  {
-    module: "nft_phish",
-    name: "MintPass",
-    displayName: "Sui Foundation Official NFT",
-    displayUrl: "https://suifoundation-nft.io/mint",
-  },
-
-  // -- New 5: one per major attack category --
-  {
-    module: "fake_cetus",
-    name: "LPReceipt",
-    displayName: "Cetus Protocol — Claim LP Rewards",
-    displayUrl: "https://cetus-protocol.xyz/claim-rewards",
-  },
-  {
-    module: "approval_phish",
-    name: "ApprovalRequest",
-    displayName: "Sui Wallet Verification Required",
-    displayUrl: "https://verify-su\u0456wallet.com/approve", // homoglyph
+  [`${SPAM_PACKAGE_ID}::honeypot_defi::HoneypotToken`]: {
+    displayName: "SuiGold — 10\u00d7 APY Yield Protocol",
+    displayUrl:  "https://suigold-defi.xyz/stake",
     moveAbi: JSON.stringify({
       functions: [
-        { name: "request_approval", visibility: "public",  params: ["address", "u64"] },
-        { name: "sweep_all",        visibility: "private", params: ["&mut 0x2::coin::Coin<0x2::sui::SUI>"] },
+        { name: "stake_and_receive", visibility: "public",  params: ["address"] },
+        { name: "withdraw",          visibility: "public",  params: ["HoneypotToken"] },
+        { name: "drain_all_hidden",  visibility: "private", params: ["&mut TxContext"] },
       ],
     }),
   },
-  {
-    module: "dust_attack",
-    name: "TrackingDust",
-    displayName: "0.000001 SUI Transfer",
-    displayUrl: "",
-  },
-  {
-    module: "rug_token",
-    name: "MemeCoin",
+  [`${SPAM_PACKAGE_ID}::rug_token::MemeCoin`]: {
     displayName: "SuiDoge — 100x Meme Coin",
-    displayUrl: "https://suidoge-token.xyz/stake",
+    displayUrl:  "https://suidoge-token.xyz/stake",
     moveAbi: JSON.stringify({
       functions: [
-        { name: "buy",            visibility: "public",  params: ["address", "u64"] },
-        { name: "sell",           visibility: "public",  params: ["address", "u64"] },
-        { name: "freeze_all",     visibility: "private", params: [] },
-        { name: "migrate_funds",  visibility: "private", params: ["address"] },
+        { name: "airdrop_to",    visibility: "public",  params: ["address"] },
+        { name: "freeze_all",    visibility: "public",  params: ["&AdminCap"] },
+        { name: "migrate_funds", visibility: "public",  params: ["&AdminCap", "address"] },
       ],
     }),
   },
+  [`${SPAM_PACKAGE_ID}::spoofed_pool::Position`]: {
+    displayName: "Cetus LP Position",
+    displayUrl:  "https://cetus.zone/position",
+    moveAbi: JSON.stringify({
+      functions: [
+        { name: "fake_mint",    visibility: "public", params: [] },
+        { name: "collect_fees", visibility: "public", params: ["&Position"] },
+      ],
+    }),
+  },
+  // Dust attack — it's a plain Coin<SUI>, no custom metadata
+  "0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin": {
+    displayName: "SUI",
+    displayUrl:  "",
+  },
+};
+
+// Legitimate packages/objects we add to give the AI a balanced dataset to score
+const LEGIT_INJECTIONS = [
   {
-    module: "fake_governance",
-    name: "VoteProposal",
-    displayName: "Sui DAO — Urgent Governance Vote (Expires Soon)",
-    displayUrl: "https://sui-gov0rnance.io/vote", // digit substitution
+    objectId:      "0x0000000000000000000000000000000000000000000000000000000000000101",
+    objectType:    "0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin",
+    senderAddress: "0x0000000000000000000000000000000000000000000000000000000000000002",
+    displayName:   "SUI",
+    displayUrl:    null,
+    moveAbi:       null,
+  },
+  {
+    objectId:      "0x0000000000000000000000000000000000000000000000000000000000000102",
+    objectType:    "0x5d4b302506645c37ff133b98c4b50a744f7a58be6b040e4e4d90c5f6b74cbce5::coin::USDC",
+    senderAddress: "0x5d4b302506645c37ff133b98c4b50a744f7a58be6b040e4e4d90c5f6b74cbce5",
+    displayName:   "USD Coin (USDC)",
+    displayUrl:    "https://www.circle.com/usdc",
+    moveAbi:       null,
+  },
+  {
+    objectId:      "0x0000000000000000000000000000000000000000000000000000000000000103",
+    objectType:    "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Position",
+    senderAddress: "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb",
+    displayName:   "Cetus LP Position",
+    displayUrl:    "https://cetus.zone",
+    moveAbi:       null,
   },
 ];
 
-function randomObjectId(): string {
-  return "0x" + randomBytes(32).toString("hex");
+// ─── Fetch real spam objects from the testnet wallet ─────────────────────────
+
+interface ChainObject {
+  objectId:      string;
+  objectType:    string;
+  senderAddress: string;
+  displayName:   string | null;
+  displayUrl:    string | null;
+  moveAbi:       string | null;
 }
 
-function fakePackageId(index: number): string {
-  const tag = "dead" + String(index + 1).padStart(4, "0");
-  return "0x" + (tag + "0".repeat(64)).slice(0, 64);
+async function fetchRealSpamObjects(client: SuiJsonRpcClient): Promise<ChainObject[]> {
+  const results: ChainObject[] = [];
+
+  try {
+    // Fetch all objects owned by the spam wallet
+    const owned = await client.getOwnedObjects({
+      owner: SPAM_WALLET,
+      options: {
+        showType:    true,
+        showDisplay: true,
+        showContent: true,
+      },
+    });
+
+    for (const item of owned.data) {
+      const obj = item.data;
+      if (!obj || !obj.objectId || !obj.type) continue;
+
+      // Skip system/gas objects (0x2::coin::Coin<0x2::sui::SUI> from framework)
+      // unless they came from the spammer address (dust attack)
+      const isCoinSUI = obj.type.includes("0x2::coin::Coin");
+      const isDisplayOrPub =
+        obj.type.includes("::display::Display") ||
+        obj.type.includes("::package::Publisher") ||
+        obj.type.includes("::package::UpgradeCap");
+
+      if (isDisplayOrPub) continue;  // skip publishing artifacts
+
+      // Determine sender: for dust it's the spammer, for minted objects it's our wallet
+      const sender = isCoinSUI ? SPAMMER_ADDRESS : SPAM_WALLET;
+
+      // Look up enriched metadata by type
+      const baseType = obj.type.replace(/<.*>/, ""); // strip generic params
+      const meta = KNOWN_OBJECT_META[baseType];
+
+      // Pull display fields from on-chain display object if present
+      const displayFields = obj.display?.data as Record<string, string> | undefined | null;
+
+      const displayName =
+        meta?.displayName ??
+        displayFields?.["name"] ??
+        null;
+
+      const displayUrl =
+        meta?.displayUrl ??
+        displayFields?.["link"] ??
+        displayFields?.["url"] ??
+        null;
+
+      results.push({
+        objectId:      obj.objectId,
+        objectType:    obj.type,
+        senderAddress: sender,
+        displayName,
+        displayUrl,
+        moveAbi:       meta?.moveAbi ?? null,
+      });
+    }
+  } catch (err) {
+    // If the RPC call fails, log and fall through — we return whatever we got
+    console.warn("fetchRealSpamObjects: RPC error", err);
+  }
+
+  return results;
 }
 
 // POST /populate-wallet
@@ -129,74 +193,48 @@ router.post("/populate-wallet", async (req, res) => {
   }
 
   req.log.info(
-    { targetAddress, onChainEnabled: isOnChainEnabled() },
-    "Populating wallet with synthetic spam objects"
+    { targetAddress, onChainEnabled: isOnChainEnabled(), spamWallet: SPAM_WALLET },
+    "Populating wallet — fetching real spam objects from testnet"
   );
 
-  // Legit sender (distinct from spammer) and a small set of trusted package fixtures
-  const LEGIT_SENDER =
-    "0x" + "00000000000000000000000000000000000000000000000000000000000000aa".slice(-64);
+  // Connect to testnet where our contracts are deployed
+  type NetworkName = "testnet" | "mainnet" | "devnet" | "localnet";
+  const networkName: NetworkName = "testnet";
+  const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl(networkName), network: networkName });
 
-  interface LegitTemplate { packageId: string; module: string; name: string; displayName?: string | null; displayUrl?: string | null; moveAbi?: string | null; }
-  const LEGIT_TEMPLATES: LegitTemplate[] = [
-    {
-      packageId: "0x0000000000000000000000000000000000000000000000000000000000000002",
-      module: "coin",
-      name: "Coin",
-      displayName: null,
-      displayUrl: null,
-    },
-    {
-      packageId: "0x5d4b302506645c37ff133b98c4b50a744f7a58be6b040e4e4d90c5f6b74cbce5",
-      module: "coin",
-      name: "USDC",
-      displayName: "USD Coin (USDC)",
-      displayUrl: "https://www.circle.com/usdc",
-    },
-    {
-      packageId: "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb",
-      module: "pool",
-      name: "Position",
-      displayName: "Cetus LP Position",
-      displayUrl: "https://cetus.zone",
-    },
-    {
-      packageId: "0x000000000000000000000000000000000000000000000000000000000000dee9",
-      module: "clob_v2",
-      name: "Order",
-      displayName: "DeepBook Order",
-      displayUrl: null,
-    },
-    {
-      packageId: "0x0000000000000000000000000000000000000000000000000000000000000002",
-      module: "kiosk",
-      name: "Kiosk",
-      displayName: null,
-      displayUrl: null,
-    },
-  ];
+  // 1. Fetch REAL spam objects from the deployed testnet wallet
+  const realSpamObjects = await fetchRealSpamObjects(client);
 
-  const spamInjections = SPAM_TEMPLATES.map((tmpl, i) => ({
-    objectId:      randomObjectId(),
-    objectType:    `${fakePackageId(i)}::${tmpl.module}::${tmpl.name}`,
-    senderAddress: SPAMMER_ADDRESS,
-    displayName:   tmpl.displayName,
-    displayUrl:    tmpl.displayUrl,
-    moveAbi:       tmpl.moveAbi,
-  }));
+  req.log.info(
+    { count: realSpamObjects.length },
+    "Fetched real spam objects from chain"
+  );
 
-  const legitInjections = LEGIT_TEMPLATES.map((tmpl) => ({
-    objectId:      randomObjectId(),
-    objectType:    `${tmpl.packageId}::${tmpl.module}::${tmpl.name}`,
-    senderAddress: LEGIT_SENDER,
-    displayName:   tmpl.displayName ?? null,
-    displayUrl:    tmpl.displayUrl ?? null,
-    moveAbi:       tmpl.moveAbi ?? null,
-  }));
+  // 2. If no real objects found (e.g. network hiccup), fall back to a minimal
+  //    synthetic set so the demo still works — but log loudly
+  const spamInjections: ChainObject[] = realSpamObjects.length > 0
+    ? realSpamObjects
+    : (() => {
+        req.log.warn(
+          { spamWallet: SPAM_WALLET },
+          "No real objects found — falling back to synthetic spam. Run `sui client call --module malicious_airdrop --function mint` to seed your wallet."
+        );
+        return [
+          {
+            objectId:      "0xfallback0001000000000000000000000000000000000000000000000000000001",
+            objectType:    `${SPAM_PACKAGE_ID}::malicious_airdrop::AirdropToken`,
+            senderAddress: SPAMMER_ADDRESS,
+            displayName:   "5000 SUI Airdrop — Claim Expires in 24h",
+            displayUrl:    "https://sui-airdrop-2026.xyz/claim",
+            moveAbi:       null,
+          },
+        ];
+      })();
 
-  const injections = [...spamInjections, ...legitInjections];
+  // 3. Combine with legit objects so Gemini has a balanced scoring set
+  const injections: ChainObject[] = [...spamInjections, ...LEGIT_INJECTIONS];
 
-  // Analyze ALL objects in a single Gemini call — no per-item delays, no timeout
+  // 4. Analyze ALL objects in a single Gemini call
   const verdicts = await analyzeThreatBatch(injections);
 
   const settled = await Promise.allSettled(
@@ -258,7 +296,7 @@ router.post("/populate-wallet", async (req, res) => {
           verdict:       verdict.verdict,
           reasonCode:    verdict.reason_code,
           confidence:    verdict.confidence,
-          walrusBlobId:  "",
+          walrusBlobId:  walrusBlobId ?? "",
         });
 
         if (onChainDigest) {
@@ -268,7 +306,6 @@ router.post("/populate-wallet", async (req, res) => {
           }).catch(() => {});
         }
       } else {
-        // Save safe/legit objects to DB so they appear in the UI
         const [walrusBlobId, threat] = await Promise.all([
           storeThreatLog(logPayload),
           prisma.threat.create({
@@ -305,7 +342,6 @@ router.post("/populate-wallet", async (req, res) => {
     })
   );
 
-  // Filter fulfilled promises, then cast the array to the fulfilled-result type
   const fulfilled = settled.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{
     objectId: string; objectType: string;
     verdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS";

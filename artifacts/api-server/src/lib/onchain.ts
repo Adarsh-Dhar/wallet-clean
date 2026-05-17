@@ -15,17 +15,30 @@
 
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction } from "@mysten/sui/transactions";
+// In @mysten/sui v2.x, SuiClient is SuiJsonRpcClient and lives in @mysten/sui/jsonRpc
+import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
+import type { SuiClientTypes } from "@mysten/sui/client";
 import { logger } from "./logger";
+
 const PACKAGE_ID     = process.env["QUARANTINE_PACKAGE_ID"];
 const ADMIN_CAP_ID   = process.env["QUARANTINE_ADMIN_CAP_ID"];
 const AGENT_PRIV_KEY = process.env["AGENT_PRIVATE_KEY"];
 const SUI_NETWORK    = process.env["SUI_NETWORK"] ?? "testnet";
+// Narrow string union used by the Sui client API
+type NetworkName = "testnet" | "mainnet" | "devnet" | "localnet";
 
-const RPC_URLS: Record<string, string> = {
-  mainnet: "https://fullnode.mainnet.sui.io:443",
-  testnet: "https://fullnode.testnet.sui.io:443",
-  devnet:  "https://fullnode.devnet.sui.io:443",
-};
+// Lazily created so the module loads even when env vars are absent
+let _client: SuiJsonRpcClient | null = null;
+function getClient(): SuiJsonRpcClient {
+  if (!_client) {
+    const networkName = SUI_NETWORK as NetworkName;
+    _client = new SuiJsonRpcClient({
+      url: getJsonRpcFullnodeUrl(networkName),
+      network: networkName,
+    });
+  }
+  return _client;
+}
 
 /** True when all three env vars are present — used to gate calls at the call site */
 export function isOnChainEnabled(): boolean {
@@ -72,30 +85,30 @@ export async function quarantineOnChain(
   }
 
   try {
-    const keypair = Ed25519Keypair.fromSecretKey(AGENT_PRIV_KEY!);
+    const keypair     = Ed25519Keypair.fromSecretKey(AGENT_PRIV_KEY!);
     const agentAddress = keypair.getPublicKey().toSuiAddress();
+    const client      = getClient();
 
     const tx = new Transaction();
     tx.setSender(agentAddress);
     tx.setGasBudget(10_000_000);
 
-    // Pass the AdminCap object as a reference argument
-    const adminCap = tx.object(ADMIN_CAP_ID!);
+    // Normalize sender address — must be a full 32-byte 0x-prefixed hex
+    const senderAddr = params.senderAddress.startsWith("0x")
+      ? params.senderAddress
+      : `0x${params.senderAddress}`;
 
     tx.moveCall({
       target: `${PACKAGE_ID}::quarantine_vault::quarantine`,
       arguments: [
-        adminCap,
+        // _cap: &AdminCap — pass the object by reference
+        tx.object(ADMIN_CAP_ID!),
         // object_id: vector<u8>
         tx.pure.vector("u8", toBytes(params.objectId)),
         // object_type: vector<u8>
         tx.pure.vector("u8", toBytes(params.objectType)),
         // sender_address: address
-        tx.pure.address(
-          params.senderAddress.startsWith("0x")
-            ? params.senderAddress
-            : `0x${params.senderAddress}`
-        ),
+        tx.pure.address(senderAddr),
         // risk_score: u8
         tx.pure.u8(Math.min(255, Math.max(0, Math.round(params.riskScore)))),
         // verdict: u8  (0=SAFE 1=SUSPICIOUS 2=MALICIOUS)
@@ -109,13 +122,31 @@ export async function quarantineOnChain(
       ],
     });
 
-    // TODO: Implement transaction signing and submission once SuiClient is properly imported
-    // For now, generate a mock digest for testing
-    const digest = "0x" + Array(64).fill(Math.floor(Math.random() * 256).toString(16).padStart(2, "0")).join("").slice(0, 64);
+    // Sign and submit — this is the real on-chain call
+    const result = await client.signAndExecuteTransaction({
+      signer:      keypair,
+      transaction: tx,
+      options: {
+        showEffects: true,
+      },
+    });
+
+    const digest = result.digest;
+
+    // Confirm the transaction succeeded on-chain
+    const status = result.effects?.status?.status;
+    if (status !== "success") {
+      const errMsg = result.effects?.status?.error ?? "unknown error";
+      logger.warn(
+        { digest, objectId: params.objectId, status, errMsg },
+        "On-chain quarantine transaction failed"
+      );
+      return null;
+    }
 
     logger.info(
-      { digest, objectId: params.objectId, verdict: params.verdict, pendingDeployment: true },
-      "On-chain quarantine recorded (mock digest — deployment pending)"
+      { digest, objectId: params.objectId, verdict: params.verdict, network: SUI_NETWORK },
+      "On-chain quarantine recorded successfully"
     );
 
     return digest;

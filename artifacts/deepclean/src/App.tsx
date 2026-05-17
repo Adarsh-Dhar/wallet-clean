@@ -23,10 +23,10 @@ const queryClient = new QueryClient({
   },
 });
 
-// Network config — devnet for hackathon, easily swappable
+// Contracts are deployed on testnet — wallet must connect to the same network
 const networks = {
-  devnet:  { url: getFullnodeUrl("devnet") },
   testnet: { url: getFullnodeUrl("testnet") },
+  devnet:  { url: getFullnodeUrl("devnet") },
 };
 
 function Router() {
@@ -50,7 +50,7 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       {/* SuiClientProvider must sit inside QueryClientProvider */}
-      <SuiClientProvider networks={networks} defaultNetwork="devnet">
+      <SuiClientProvider networks={networks} defaultNetwork="testnet">
         {/* autoConnect re-connects the last wallet on page load */}
         <WalletProvider autoConnect>
           <TooltipProvider>
