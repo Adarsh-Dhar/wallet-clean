@@ -15,6 +15,7 @@ model Threat {
   objectId           String    @map("object_id")
   objectType         String    @map("object_type")
   senderAddress      String    @map("sender_address")
+  walletAddress      String?   @map("wallet_address")
   displayName        String?   @map("display_name")
   displayUrl         String?   @map("display_url")
   riskScore          Int       @map("risk_score")

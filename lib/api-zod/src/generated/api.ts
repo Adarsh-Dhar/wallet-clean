@@ -25,6 +25,7 @@ export const listThreatsQueryOffsetDefault = 0;
 export const ListThreatsQueryParams = zod.object({
   "verdict": zod.enum(['SAFE', 'SUSPICIOUS', 'MALICIOUS']).optional(),
   "status": zod.enum(['quarantined', 'released', 'burned']).optional(),
+  "walletAddress": zod.string().optional(),
   "limit": zod.coerce.number().default(listThreatsQueryLimitDefault),
   "offset": zod.coerce.number().default(listThreatsQueryOffsetDefault)
 })

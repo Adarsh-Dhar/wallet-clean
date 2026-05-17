@@ -359,18 +359,16 @@ export default function Wallets() {
   });
 
   async function performDeepClean(walletId: number, walletAddress: string) {
-    appendSeedLog(walletId, mkLog("info", "  Fetching quarantined threats from DB…"));
+    appendSeedLog(walletId, mkLog("info", "  Fetching quarantined threats from DB for wallet…"));
 
     const threatsRes = await fetch(
-      new URL("/api/threats?status=quarantined&limit=200", API_BASE).toString(),
+      new URL(`/api/threats?status=quarantined&limit=200&walletAddress=${encodeURIComponent(walletAddress)}`, API_BASE).toString(),
     );
     if (!threatsRes.ok) {
       throw new Error(`Failed to fetch threats: HTTP ${threatsRes.status}`);
     }
 
-    const allThreats = await threatsRes.json() as QuarantinedThreat[];
-    const normalizedAddress = walletAddress.toLowerCase();
-    const threats = allThreats.filter((threat) => threat.senderAddress.toLowerCase() === normalizedAddress);
+    const threats = await threatsRes.json() as QuarantinedThreat[];
 
     if (threats.length === 0) {
       appendSeedLog(walletId, mkLog("info", "No quarantined threats to clean"));

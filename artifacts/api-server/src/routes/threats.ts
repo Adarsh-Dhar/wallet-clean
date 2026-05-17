@@ -24,12 +24,13 @@ router.get("/threats", async (req, res) => {
     return;
   }
 
-  const { verdict, status, limit = 50, offset = 0 } = query.data;
+  const { verdict, status, walletAddress, limit = 50, offset = 0 } = query.data;
 
   const threats = await prisma.threat.findMany({
     where: {
       ...(verdict ? { verdict } : {}),
       ...(status  ? { status }  : {}),
+      ...(walletAddress ? { walletAddress: { equals: walletAddress, mode: "insensitive" } } : {}),
     },
     orderBy: { detectedAt: "desc" },
     take: limit,
