@@ -41,7 +41,14 @@ function getClient(): SuiJsonRpcClient {
 
 /** True when all three env vars are present — used to gate calls at the call site */
 export function isOnChainEnabled(): boolean {
-  return Boolean(PACKAGE_ID && ADMIN_CAP_ID && AGENT_PRIV_KEY);
+  // Ensure required env vars are present and the agent key is parseable
+  if (!PACKAGE_ID || !ADMIN_CAP_ID || !AGENT_PRIV_KEY) return false;
+  try {
+    const parsed = parseAgentPrivateKey(AGENT_PRIV_KEY);
+    return parsed !== null;
+  } catch (e) {
+    return false;
+  }
 }
 
 export interface QuarantineOnChainParams {
@@ -220,6 +227,8 @@ export async function quarantineOnChain(
       ],
     });
 
+    logger.info({ objectId: params.objectId, network: SUI_NETWORK }, "Recording on-chain quarantine…");
+
     // Sign and submit — this is the real on-chain call
     const result = await client.signAndExecuteTransaction({
       signer:      keypair,
@@ -244,7 +253,7 @@ export async function quarantineOnChain(
 
     logger.info(
       { digest, objectId: params.objectId, verdict: params.verdict, network: SUI_NETWORK },
-      "On-chain quarantine recorded successfully"
+      `On-chain quarantine recorded → digest: ${digest}`
     );
 
     return digest;

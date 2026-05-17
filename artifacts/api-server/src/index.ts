@@ -2,6 +2,7 @@ import "dotenv/config";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startMonitor } from "./lib/monitor";
+import { isOnChainEnabled } from "./lib/onchain";
 import { prisma } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
@@ -25,6 +26,8 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+  const REAL_ONCHAIN = (process.env["REAL_ONCHAIN"] ?? "false").toLowerCase() === "true";
+  logger.info({ REAL_ONCHAIN, onChainEnabled: isOnChainEnabled() }, "On-chain configuration");
   (async () => {
     // Validate DB connection early so misconfigured DATABASE_URL fails fast.
     try {

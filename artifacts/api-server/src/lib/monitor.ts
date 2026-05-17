@@ -225,25 +225,31 @@ async function analyzeAndStore(
 
       // BUG FIX #4: Add Sui integration — record quarantine on-chain
       if (isOnChainEnabled()) {
-        quarantineOnChain({
-          objectId,
-          objectType,
-          senderAddress,
-          riskScore: verdict.risk_score,
-          verdict: verdict.verdict,
-          reasonCode: verdict.reason_code,
-          confidence: verdict.confidence,
-          walrusBlobId: walrusBlobId ?? "",
-        }).then((digest) => {
+        try {
+          const digest = await quarantineOnChain({
+            objectId,
+            objectType,
+            senderAddress,
+            riskScore: verdict.risk_score,
+            verdict: verdict.verdict,
+            reasonCode: verdict.reason_code,
+            confidence: verdict.confidence,
+            walrusBlobId: walrusBlobId ?? "",
+          });
+
           if (digest) {
-            prisma.threat.update({
-              where: { id: inserted.id },
-              data: { quarantineTxDigest: digest },
-            }).catch(() => {});
+            try {
+              await prisma.threat.update({
+                where: { id: inserted.id },
+                data: { quarantineTxDigest: digest },
+              });
+            } catch {
+              // ignore DB update failures
+            }
           }
-        }).catch((err) => {
+        } catch (err) {
           logger.warn({ err, objectId }, "On-chain quarantine failed (non-blocking)");
-        });
+        }
       }
 
       // Increment threatsDetected counter

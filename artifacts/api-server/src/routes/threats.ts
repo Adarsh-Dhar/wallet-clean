@@ -89,6 +89,7 @@ router.post("/threats/analyze", async (req, res) => {
     });
 
     let savedThreatId: number | null = null;
+    let onChainDigest: string | null = null;
 
     // BUG FIX #1: Check verdict type AND high score threshold before quarantining
     // Requires BOTH conditions: (1) explicitly MALICIOUS AND (2) score >= 75
@@ -125,18 +126,24 @@ router.post("/threats/analyze", async (req, res) => {
 
       // BUG FIX #4: Add Sui integration — record quarantine on-chain
       if (isOnChainEnabled()) {
-        quarantineOnChain({
-          objectId:      input.objectId,
-          objectType:    input.objectType,
-          senderAddress: input.senderAddress,
-          riskScore:     verdict.risk_score,
-          verdict:       verdict.verdict,
-          reasonCode:    verdict.reason_code,
-          confidence:    verdict.confidence,
-          walrusBlobId:  walrusBlobId ?? "",
-        }).catch((err) => {
+        try {
+          onChainDigest = await quarantineOnChain({
+            objectId:      input.objectId,
+            objectType:    input.objectType,
+            senderAddress: input.senderAddress,
+            riskScore:     verdict.risk_score,
+            verdict:       verdict.verdict,
+            reasonCode:    verdict.reason_code,
+            confidence:    verdict.confidence,
+            walrusBlobId:  walrusBlobId ?? "",
+          });
+
+          if (onChainDigest) {
+            await prisma.threat.update({ where: { id: savedThreatId! }, data: { quarantineTxDigest: onChainDigest } }).catch(() => {});
+          }
+        } catch (err) {
           req.log.warn({ err, objectId: input.objectId }, "On-chain quarantine failed (non-blocking)");
-        });
+        }
       }
     } else {
       storeThreatLog(logPayload).catch(() => {});
@@ -150,6 +157,7 @@ router.post("/threats/analyze", async (req, res) => {
       flags:        verdict.flags,
       reasoning:    verdict.reasoning,
       savedThreatId,
+      onChainDigest,
       latencyMs,
       staticSignals,
     });
