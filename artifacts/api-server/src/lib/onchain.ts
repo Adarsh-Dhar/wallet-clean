@@ -19,17 +19,16 @@ import { Transaction } from "@mysten/sui/transactions";
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { logger } from "./logger";
 
-const PACKAGE_ID     = process.env["QUARANTINE_PACKAGE_ID"];
-const ADMIN_CAP_ID   = process.env["QUARANTINE_ADMIN_CAP_ID"];
-const AGENT_PRIV_KEY = process.env["AGENT_PRIVATE_KEY"];
-const SUI_NETWORK    = process.env["SUI_NETWORK"] ?? "testnet";
+// NOTE: Do NOT read env vars here — they may not be loaded yet!
+// Read them lazily when needed, inside functions.
+// Lazily created so the module loads even when env vars are absent
+let _client: SuiJsonRpcClient | null = null;
 // Narrow string union used by the Sui client API
 type NetworkName = "testnet" | "mainnet" | "devnet" | "localnet";
 
-// Lazily created so the module loads even when env vars are absent
-let _client: SuiJsonRpcClient | null = null;
 function getClient(): SuiJsonRpcClient {
   if (!_client) {
+    const SUI_NETWORK = process.env["SUI_NETWORK"] ?? "testnet";
     const networkName = SUI_NETWORK as NetworkName;
     _client = new SuiJsonRpcClient({
       url: getJsonRpcFullnodeUrl(networkName),
@@ -41,6 +40,11 @@ function getClient(): SuiJsonRpcClient {
 
 /** True when all three env vars are present — used to gate calls at the call site */
 export function isOnChainEnabled(): boolean {
+  // Read env vars lazily (after dotenv.config() has run)
+  const PACKAGE_ID     = process.env["QUARANTINE_PACKAGE_ID"];
+  const ADMIN_CAP_ID   = process.env["QUARANTINE_ADMIN_CAP_ID"];
+  const AGENT_PRIV_KEY = process.env["AGENT_PRIVATE_KEY"];
+
   // Ensure required env vars are present and the agent key is parseable
   if (!PACKAGE_ID || !ADMIN_CAP_ID || !AGENT_PRIV_KEY) return false;
   try {
@@ -92,9 +96,56 @@ function tryBase64Decode(s: string): Uint8Array | null {
   }
 }
 
+/** Decode Bech32 format (used by suiprivkey1...) */
+function decodeBech32(encoded: string): Uint8Array | null {
+  if (!encoded.match(/^[a-z0-9]{6,}1[ac-hj-np-z02-9]{58,}$/i)) {
+    return null;
+  }
+  
+  const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+  const decoded = encoded.toLowerCase();
+  const lastOne = decoded.lastIndexOf("1");
+  
+  if (lastOne < 1 || lastOne + 7 > decoded.length || decoded.length > 90) {
+    return null;
+  }
+  
+  const hrp = decoded.substring(0, lastOne);
+  const data = decoded.substring(lastOne + 1);
+  
+  // Decode data part
+  const decodedData: number[] = [];
+  for (const char of data) {
+    const d = CHARSET.indexOf(char);
+    if (d < 0) return null;
+    decodedData.push(d);
+  }
+  
+  // Extract the key bytes (skip checksum: last 6 characters = 30 bits)
+  const keyLengthInBits = (decodedData.length - 6) * 5;
+  const keyLengthInBytes = Math.floor(keyLengthInBits / 8);
+  
+  const result: number[] = [];
+  let accumulator = 0;
+  let bits = 0;
+  
+  for (let i = 0; i < decodedData.length - 6; i++) {
+    accumulator = (accumulator << 5) | decodedData[i];
+    bits += 5;
+    
+    if (bits >= 8) {
+      bits -= 8;
+      result.push((accumulator >> bits) & 0xff);
+    }
+  }
+  
+  return result.length >= 32 ? new Uint8Array(result.slice(0, 32)) : null;
+}
+
 /**
  * Parse various AGENT_PRIVATE_KEY formats into a Uint8Array secret key.
  * Supported formats:
+ *  - suiprivkey1... (Bech32 encoded Sui private key)
  *  - 0x-prefixed hex string
  *  - raw hex string
  *  - base64 encoded bytes
@@ -104,6 +155,15 @@ function tryBase64Decode(s: string): Uint8Array | null {
 function parseAgentPrivateKey(raw: string): Uint8Array | null {
   if (!raw) return null;
   const s = raw.trim();
+
+  // suiprivkey1... (Bech32 format)
+  if (s.startsWith("suiprivkey1")) {
+    const decoded = decodeBech32(s);
+    if (decoded && decoded.length >= 32) {
+      logger.debug("Successfully parsed AGENT_PRIVATE_KEY as suiprivkey1 format");
+      return decoded;
+    }
+  }
 
   // Hex (0x or bare)
   if (/^0x[0-9a-fA-F]+$/.test(s) || /^[0-9a-fA-F]+$/.test(s)) {
@@ -160,6 +220,7 @@ function parseAgentPrivateKey(raw: string): Uint8Array | null {
     try { return hexToBytes(s); } catch {}
   }
 
+  logger.warn({ keyStart: s.substring(0, 30) }, "Could not parse AGENT_PRIVATE_KEY in any format");
   return null;
 }
 
@@ -181,7 +242,13 @@ export async function quarantineOnChain(
   }
 
   try {
-    const keyBytes = parseAgentPrivateKey(AGENT_PRIV_KEY!);
+    // Read env vars lazily
+    const AGENT_PRIV_KEY = process.env["AGENT_PRIVATE_KEY"]!;
+    const PACKAGE_ID     = process.env["QUARANTINE_PACKAGE_ID"]!;
+    const ADMIN_CAP_ID   = process.env["QUARANTINE_ADMIN_CAP_ID"]!;
+    const SUI_NETWORK    = process.env["SUI_NETWORK"] ?? "testnet";
+
+    const keyBytes = parseAgentPrivateKey(AGENT_PRIV_KEY);
     if (!keyBytes) {
       logger.error(
         { hint: "AGENT_PRIVATE_KEY accepted formats: 0xhex, hex, base64, JSON{secretKey:[..]}" },

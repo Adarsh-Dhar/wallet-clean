@@ -1,9 +1,16 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startMonitor } from "./lib/monitor";
 import { isOnChainEnabled } from "./lib/onchain";
 import { prisma } from "@workspace/db";
+
+// Load .env from root directory
+// CWD is /artifacts/api-server, so we need to go up 2 levels to reach root
+const rootEnvPath = path.resolve(process.cwd(), "../../.env");
+dotenv.config({ path: rootEnvPath });
 
 const rawPort = process.env["PORT"];
 

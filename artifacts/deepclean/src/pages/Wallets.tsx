@@ -427,7 +427,7 @@ export default function Wallets() {
       appendSeedLog(walletId, mkLog("success", "  [legit] pool::Position — Cetus LP Position"));
       appendSeedLog(walletId, mkLog("success", "  [legit] clob_v2::Order — DeepBook Order"));
       appendSeedLog(walletId, mkLog("success", "  [legit] kiosk::Kiosk — Sui Kiosk"));
-      appendSeedLog(walletId, mkLog("info", "Sending all 15 to Gemini AI for analysis…"));
+      appendSeedLog(walletId, mkLog("info", "Sending all 15 to GitHub Models for analysis…"));
     },
 
     onSuccess: async (result, { address }) => {

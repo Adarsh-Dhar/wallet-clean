@@ -23,7 +23,7 @@
 import "dotenv/config";
 
 const API_BASE = process.env["API_BASE"] ?? "http://localhost:80/api";
-// Each fixture may wait in the server-side Gemini queue (≥5 s/slot) then call Gemini (~6 s)
+// Each fixture may wait in the server-side model queue (≥5 s/slot) then call the model (~6 s)
 // Allow plenty of headroom: 10 fixtures × 11 s = 110 s, so 120 s per-fixture is safe
 const ANALYSIS_TIMEOUT_MS = 120_000;
 

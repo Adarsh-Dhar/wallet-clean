@@ -19,7 +19,7 @@ services:
     environment:
       PORT: "8080"
       DATABASE_URL: postgres://deepclean:deepclean@postgres:5437/deepclean
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GITHUB_MODELS_TOKEN: ${GITHUB_MODELS_TOKEN}
     depends_on:
       - postgres
 

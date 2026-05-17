@@ -85,7 +85,7 @@ async function runTest() {
     console.log("✅ All verdicts correct — agent is properly differentiating malicious from legit.\n");
     process.exit(0);
   } else {
-    console.log("❌ Some verdicts were wrong — check Gemini prompt or mock logic.\n");
+    console.log("❌ Some verdicts were wrong — check the model prompt or mock logic.\n");
     process.exit(1);
   }
 }

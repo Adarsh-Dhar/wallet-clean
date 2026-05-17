@@ -52,7 +52,7 @@ export const ListThreatsResponse = zod.array(ListThreatsResponseItem)
 
 
 /**
- * @summary Analyze a Sui object for threats using Gemini AI
+ * @summary Analyze a Sui object for threats using GitHub Models AI
  */
 export const AnalyzeThreatBody = zod.object({
   "objectId": zod.string(),

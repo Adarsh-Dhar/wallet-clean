@@ -1,6 +1,6 @@
 # DeepClean
 
-An autonomous Sui blockchain spam & phishing filter agent. It monitors wallet addresses for incoming malicious assets, runs AI-powered threat analysis via Gemini 2.5 Flash, and auto-quarantines high-risk objects. Users can release or burn quarantined assets from the dashboard.
+An autonomous Sui blockchain spam & phishing filter agent. It monitors wallet addresses for incoming malicious assets, runs AI-powered threat analysis via GitHub Models gpt-4o, and auto-quarantines high-risk objects. Users can release or burn quarantined assets from the dashboard.
 
 ## Run & Operate
 
@@ -11,7 +11,7 @@ An autonomous Sui blockchain spam & phishing filter agent. It monitors wallet ad
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
-- Required env: `GEMINI_API_KEY` — Gemini API key for threat analysis
+- Required env: `GITHUB_MODELS_TOKEN` — GitHub Models token for threat analysis
 
 ## Stack
 
@@ -22,7 +22,7 @@ An autonomous Sui blockchain spam & phishing filter agent. It monitors wallet ad
 - API codegen: Orval (from OpenAPI spec)
 - Build: esbuild (CJS bundle)
 - Frontend: React + Vite + Tailwind CSS + shadcn/ui + Recharts
-- AI: Gemini 2.5 Flash via REST API
+- AI: GitHub Models gpt-4o via REST API
 
 ## Where things live
 
@@ -31,15 +31,15 @@ An autonomous Sui blockchain spam & phishing filter agent. It monitors wallet ad
 - Generated hooks: `lib/api-client-react/src/generated/`
 - Generated Zod schemas: `lib/api-zod/src/generated/`
 - API routes: `artifacts/api-server/src/routes/` — threats, wallets, stats, health
-- Gemini AI service: `artifacts/api-server/src/lib/gemini.ts`
+- GitHub Models AI service: `artifacts/api-server/src/lib/gemini.ts`
 - Frontend pages: `artifacts/deepclean/src/pages/`
 - Frontend components: `artifacts/deepclean/src/components/`
 
 ## Architecture decisions
 
-- Threat analysis uses Gemini 2.5 Flash with structured JSON output (`responseMimeType: "application/json"`)
+- Threat analysis uses GitHub Models gpt-4o with structured JSON output
 - Assets with `risk_score >= 65` are auto-quarantined and saved to the DB
-- Mock analysis fallback when `GEMINI_API_KEY` is missing (deterministic based on URL patterns)
+- Mock analysis fallback when `GITHUB_MODELS_TOKEN` is missing (deterministic based on URL patterns)
 - The quarantine vault concept mirrors the Sui Move smart contract design — status field tracks quarantined/released/burned
 - Walrus blob IDs stored on threats link to the verifiable off-chain AI logs
 
@@ -48,12 +48,12 @@ An autonomous Sui blockchain spam & phishing filter agent. It monitors wallet ad
 - **Dashboard** — live threat stats, risk breakdown chart, recent activity feed
 - **Threats** — filterable table of all detected objects with verdict/risk/status and release/burn actions
 - **Threat Detail** — full AI reasoning, flags, metadata, Walrus blob ID with copy button
-- **Analyze** — manual form to submit any Sui object for AI analysis (Gemini 2.5 Flash)
+- **Analyze** — manual form to submit any Sui object for AI analysis (GitHub Models gpt-4o)
 - **Wallets** — manage monitored wallet addresses with add/remove
 
 ## User preferences
 
-- Uses Gemini 2.5 Flash model (`gemini-2.5-flash`) via Gemini REST API
+- Uses GitHub Models `openai/gpt-4o` via the GitHub Models inference API
 - Dark theme by default — deep navy/black with electric cyan primary and violet secondary
 
 ## Gotchas

@@ -239,10 +239,10 @@ router.post("/populate-wallet", async (req, res) => {
         ];
       })();
 
-  // 3. Combine with legit objects so Gemini has a balanced scoring set
+  // 3. Combine with legit objects so the model has a balanced scoring set
   const injections: ChainObject[] = [...spamInjections, ...LEGIT_INJECTIONS];
 
-  // 4. Analyze ALL objects in a single Gemini call
+  // 4. Analyze ALL objects in a single model call
   const verdicts = await analyzeThreatBatch(injections);
 
   const settled = await Promise.allSettled(

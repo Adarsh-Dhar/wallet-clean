@@ -218,7 +218,7 @@ export const getAnalyzeThreatUrl = () => {
 }
 
 /**
- * @summary Analyze a Sui object for threats using Gemini AI
+ * @summary Analyze a Sui object for threats using GitHub Models AI
  */
 export const analyzeThreat = async (threatAnalysisInput: ThreatAnalysisInput, options?: RequestInit): Promise<ThreatAnalysisResult> => {
 
@@ -267,7 +267,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type AnalyzeThreatMutationError = ErrorType<unknown>
 
     /**
- * @summary Analyze a Sui object for threats using Gemini AI
+ * @summary Analyze a Sui object for threats using GitHub Models AI
  */
 export const useAnalyzeThreat = <TError = ErrorType<unknown>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof analyzeThreat>>, TError,{data: BodyType<ThreatAnalysisInput>}, TContext>, request?: SecondParameter<typeof customFetch>}

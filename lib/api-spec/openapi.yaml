@@ -69,7 +69,7 @@ paths:
     post:
       operationId: analyzeThreat
       tags: [threats]
-      summary: Analyze a Sui object for threats using Gemini AI
+      summary: Analyze a Sui object for threats using GitHub Models AI
       requestBody:
         required: true
         content:

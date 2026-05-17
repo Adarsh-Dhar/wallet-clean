@@ -1,8 +1,8 @@
 import { logger } from "./logger";
 
-const GEMINI_API_KEY = process.env["GEMINI_API_KEY"];
-const GEMINI_MODEL = "gemini-2.5-flash";
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const GITHUB_MODELS_TOKEN = process.env["GITHUB_MODELS_TOKEN"] ?? process.env["GITHUB_MODEL_TOKEN"];
+const GITHUB_MODELS_MODEL = "openai/gpt-4o";
+const GITHUB_MODELS_API_URL = "https://models.github.ai/inference/chat/completions";
 
 export interface ThreatAnalysisInput {
   objectId: string;
@@ -25,7 +25,7 @@ export interface ThreatAnalysisOutput {
 // Layer 0: Static pre-filter
 //
 // Runs deterministic checks before any AI call. Results are injected into the
-// Gemini prompt as structured facts so the model reasons over hard evidence,
+// Model prompt as structured facts so the model reasons over hard evidence,
 // not just raw metadata strings.
 
 export interface StaticSignals {
@@ -208,37 +208,35 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Gemini rate limiter — serializes all API calls through a promise chain.
+ * Model rate limiter — serializes all API calls through a promise chain.
  *
- * Why a chain: Gemini 2.5 Flash free tier is ~10 RPM. Firing concurrent requests
- * causes 503 "high demand" errors. By serializing, each call waits for the previous
- * to finish (including all its retries) before it can start. After each call we
- * enforce an additional GEMINI_POST_CALL_DELAY_MS gap so the next slot opens safely.
+ * Why a chain: the high-tier GitHub Models rate limit is 10 RPM for this workload.
+ * Firing concurrent requests can trigger throttling. By serializing, each call waits
+ * for the previous to finish (including all its retries) before it can start. After
+ * each call we enforce an additional MODEL_POST_CALL_DELAY_MS gap so the next slot opens safely.
  */
-// BUG FIX #3: Reduced from 6000ms to 1000ms for faster analysis
-// Actual request time (~2s) + 1s gap = ~3s per call = 20 RPM (safe, under 10 RPM limit)
-import { GEMINI_POST_CALL_DELAY_MS } from "./constants";
+import { MODEL_POST_CALL_DELAY_MS } from "./constants";
 // Every call appends to this chain; the chain resolves only after the gap expires.
-let geminiChain: Promise<void> = Promise.resolve();
+let analysisChain: Promise<void> = Promise.resolve();
 
-function enqueueGeminiCall<T>(fn: () => Promise<T>): Promise<T> {
+function enqueueModelCall<T>(fn: () => Promise<T>): Promise<T> {
   const result = new Promise<T>((resolve, reject) => {
-    geminiChain = geminiChain.then(async () => {
+    analysisChain = analysisChain.then(async () => {
       try {
         resolve(await fn());
       } catch (err) {
         reject(err);
       }
       // Enforce the inter-call gap regardless of success or failure
-      await sleep(GEMINI_POST_CALL_DELAY_MS);
+      await sleep(MODEL_POST_CALL_DELAY_MS);
     });
   });
   return result;
 }
 
 export async function analyzeThreat(input: ThreatAnalysisInput): Promise<ThreatAnalysisOutput> {
-  if (!GEMINI_API_KEY) {
-    logger.warn("GEMINI_API_KEY not set, returning mock analysis");
+  if (!GITHUB_MODELS_TOKEN) {
+    logger.warn("GITHUB_MODELS_TOKEN not set, returning mock analysis");
     return mockAnalysis(input);
   }
 
@@ -267,27 +265,33 @@ ${adjustment > 0 ? `+${adjustment}` : adjustment} points (apply this as a baseli
 Analyze this asset and return ONLY the JSON verdict.`;
 
   /**
-   * Enqueue this call through the rate-limit chain.
-   * The chain executes one call at a time, waiting GEMINI_POST_CALL_DELAY_MS
-   * after each call (including all its retries) before dispatching the next.
+  * Enqueue this call through the rate-limit chain.
+  * The chain executes one call at a time, waiting MODEL_POST_CALL_DELAY_MS
+  * after each call (including all its retries) before dispatching the next.
    */
-  return enqueueGeminiCall(async () => {
+  return enqueueModelCall(async () => {
     const MAX_RETRIES = 3;
     const BASE_DELAY_MS = 8_000;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+        const response = await fetch(GITHUB_MODELS_API_URL, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${GITHUB_MODELS_TOKEN}`,
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
           body: JSON.stringify({
-            system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-            contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-            generationConfig: {
-              temperature: 0.1,
-              maxOutputTokens: 1024,
-              responseMimeType: "application/json",
-            },
+            model: GITHUB_MODELS_MODEL,
+            messages: [
+              { role: "system", content: SYSTEM_PROMPT },
+              { role: "user", content: userPrompt },
+            ],
+            temperature: 0.1,
+            max_tokens: 1024,
+            response_format: { type: "json_object" },
           }),
           signal: AbortSignal.timeout(30_000),
         });
@@ -298,64 +302,60 @@ Analyze this asset and return ONLY the JSON verdict.`;
           // Use a shorter cap for 503; transient "high demand" resolves quickly
           const delay = retryAfter || Math.min(BASE_DELAY_MS, 4_000);
           if (attempt < MAX_RETRIES) {
-            logger.warn({ attempt, delay, status: response.status }, "Gemini throttled — retrying");
+            logger.warn({ attempt, delay, status: response.status }, "GitHub Models throttled — retrying");
             await sleep(delay);
             continue;
           }
           // Final attempt still throttled → fall back to mock
-          logger.warn({ status: response.status }, "Gemini persistently throttled — using mock fallback");
+          logger.warn({ status: response.status }, "GitHub Models persistently throttled — using mock fallback");
           return mockAnalysis(input);
         }
 
         if (!response.ok) {
           const errText = await response.text();
-          logger.error({ status: response.status, body: errText }, "Gemini API error");
+          logger.error({ status: response.status, body: errText }, "GitHub Models API error");
           if (response.status >= 500 && attempt < MAX_RETRIES) {
             await sleep(BASE_DELAY_MS * attempt);
             continue;
           }
-          throw new Error(`Gemini API returned ${response.status}`);
+          throw new Error(`GitHub Models API returned ${response.status}`);
         }
 
         const data = (await response.json()) as {
-          candidates?: Array<{
-            content?: { parts?: Array<{ text?: string }> };
-            finishReason?: string;
-          }>;
+          choices?: Array<{ message?: { content?: string | null } }>;
           error?: { message?: string };
         };
 
         // Some errors arrive as 200 with an error body
         if (data.error?.message) {
-          logger.error({ error: data.error }, "Gemini API error in response body");
+          logger.error({ error: data.error }, "GitHub Models API error in response body");
           if (attempt < MAX_RETRIES) {
             await sleep(BASE_DELAY_MS * attempt);
             continue;
           }
-          throw new Error(`Gemini error: ${data.error.message}`);
+          throw new Error(`GitHub Models error: ${data.error.message}`);
         }
 
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        const text = data.choices?.[0]?.message?.content ?? "";
         if (!text) {
-          const finishReason = data.candidates?.[0]?.finishReason;
-          logger.warn({ finishReason, attempt }, "Empty Gemini response");
+          logger.warn({ attempt }, "Empty GitHub Models response");
           if (attempt < MAX_RETRIES) {
             await sleep(BASE_DELAY_MS * attempt);
             continue;
           }
-          throw new Error(`Empty response from Gemini (finishReason=${finishReason})`);
+          throw new Error("Empty response from GitHub Models");
         }
 
         let parsed: ThreatAnalysisOutput;
         try {
           parsed = JSON.parse(text) as ThreatAnalysisOutput;
         } catch {
-          logger.warn({ text: text.slice(0, 200), attempt }, "Gemini returned non-JSON");
+          logger.warn({ text: text.slice(0, 200), attempt }, "GitHub Models returned non-JSON");
           if (attempt < MAX_RETRIES) {
             await sleep(BASE_DELAY_MS * attempt);
             continue;
           }
-          throw new Error("Gemini response was not valid JSON");
+          throw new Error("GitHub Models response was not valid JSON");
         }
 
         return {
@@ -368,20 +368,20 @@ Analyze this asset and return ONLY the JSON verdict.`;
         };
       } catch (err) {
         if (attempt === MAX_RETRIES) {
-          logger.warn({ err }, "Gemini unavailable after all retries — using mock fallback");
+          logger.warn({ err }, "GitHub Models unavailable after all retries — using mock fallback");
           return mockAnalysis(input);
         }
-        logger.warn({ err, attempt }, "Gemini call failed — retrying");
+        logger.warn({ err, attempt }, "GitHub Models call failed — retrying");
         await sleep(BASE_DELAY_MS * attempt);
       }
     }
     // Should not reach here, but guard anyway
-    logger.warn("Gemini retry loop exhausted without returning — using mock fallback");
+    logger.warn("GitHub Models retry loop exhausted without returning — using mock fallback");
     return mockAnalysis(input);
   });
 }
 
-// ─── Batch analysis (one Gemini call for all objects) ─────────────────────────
+// ─── Batch analysis (one model call for all objects) ─────────────────────────
 
 export interface BatchThreatInput {
   objectId: string;
@@ -405,8 +405,8 @@ export interface BatchThreatOutput {
 export async function analyzeThreatBatch(
   inputs: BatchThreatInput[]
 ): Promise<BatchThreatOutput[]> {
-  if (!GEMINI_API_KEY) {
-    logger.warn("GEMINI_API_KEY not set, returning mock batch analysis");
+  if (!GITHUB_MODELS_TOKEN) {
+    logger.warn("GITHUB_MODELS_TOKEN not set, returning mock batch analysis");
     return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
   }
 
@@ -481,16 +481,23 @@ ${itemsText}`;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+      const response = await fetch(GITHUB_MODELS_API_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${GITHUB_MODELS_TOKEN}`,
+          "Content-Type": "application/json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
         body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: batchPrompt }] }],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 4096,
-            responseMimeType: "application/json",
-          },
+          model: GITHUB_MODELS_MODEL,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: batchPrompt },
+          ],
+          temperature: 0.1,
+          max_tokens: 4096,
+          response_format: { type: "json_object" },
         }),
         signal: AbortSignal.timeout(60_000),
       });
@@ -498,44 +505,44 @@ ${itemsText}`;
       if (response.status === 429 || response.status === 503) {
         const delay = BASE_DELAY_MS * attempt;
         if (attempt < MAX_RETRIES) {
-          logger.warn({ attempt, status: response.status }, "Gemini throttled (batch) — retrying");
+          logger.warn({ attempt, status: response.status }, "GitHub Models throttled (batch) — retrying");
           await sleep(delay);
           continue;
         }
-        logger.warn("Gemini batch persistently throttled — using mock fallback");
+        logger.warn("GitHub Models batch persistently throttled — using mock fallback");
         return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
       }
 
       if (!response.ok) {
         const errText = await response.text();
-        logger.error({ status: response.status, body: errText }, "Gemini batch API error");
+        logger.error({ status: response.status, body: errText }, "GitHub Models batch API error");
         if (response.status >= 500 && attempt < MAX_RETRIES) {
           await sleep(BASE_DELAY_MS * attempt);
           continue;
         }
-        throw new Error(`Gemini batch API returned ${response.status}`);
+        throw new Error(`GitHub Models batch API returned ${response.status}`);
       }
 
       const data = (await response.json()) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
+        choices?: Array<{ message?: { content?: string | null } }>;
         error?: { message?: string };
       };
 
       if (data.error?.message) {
-        throw new Error(`Gemini error: ${data.error.message}`);
+        throw new Error(`GitHub Models error: ${data.error.message}`);
       }
 
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) throw new Error("Empty batch response from Gemini");
+      const text = data.choices?.[0]?.message?.content ?? "";
+      if (!text) throw new Error("Empty batch response from GitHub Models");
 
       let parsed: BatchThreatOutput[];
       try {
         const clean = text.replace(/```json|```/g, "").trim();
         parsed = JSON.parse(clean) as BatchThreatOutput[];
       } catch {
-        logger.warn({ text: text.slice(0, 400), attempt }, "Gemini batch returned non-JSON");
+        logger.warn({ text: text.slice(0, 400), attempt }, "GitHub Models batch returned non-JSON");
         if (attempt < MAX_RETRIES) { await sleep(BASE_DELAY_MS * attempt); continue; }
-        throw new Error("Gemini batch response was not valid JSON");
+        throw new Error("GitHub Models batch response was not valid JSON");
       }
 
       // Validate and sanitize each result; fall back per-item to mock if missing
@@ -554,10 +561,10 @@ ${itemsText}`;
       });
     } catch (err) {
       if (attempt === MAX_RETRIES) {
-        logger.warn({ err }, "Gemini batch unavailable after retries — using mock fallback");
+        logger.warn({ err }, "GitHub Models batch unavailable after retries — using mock fallback");
         return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
       }
-      logger.warn({ err, attempt }, "Gemini batch failed — retrying");
+      logger.warn({ err, attempt }, "GitHub Models batch failed — retrying");
       await sleep(BASE_DELAY_MS * attempt);
     }
   }
@@ -571,7 +578,7 @@ function validateVerdict(v: unknown): "SAFE" | "SUSPICIOUS" | "MALICIOUS" {
 }
 
 /**
- * Deterministic mock analysis used when GEMINI_API_KEY is absent or Gemini is
+ * Deterministic mock analysis used when GITHUB_MODELS_TOKEN is absent or the model is
  * unreachable after all retries.  Designed to produce the correct verdicts for
  * all known T2 fixture categories (honeypot ABI, phishing URL, spam, safe coin,
  * safe NFT, no-metadata edge case).

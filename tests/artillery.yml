@@ -1,0 +1,81 @@
+config:
+  target: "http://localhost:8080"
+  phases:
+    # Warm up phase: slow ramp-up
+    - duration: 60
+      arrivalRate: 1
+      name: "Warm up"
+    
+    # Steady state: normal load
+    - duration: 120
+      arrivalRate: 5
+      name: "Steady state"
+    
+    # Spike test: sudden increase
+    - duration: 60
+      arrivalRate: 20
+      name: "Spike"
+    
+    # Cool down: gradual decrease
+    - duration: 60
+      arrivalRate: 2
+      name: "Cool down"
+  
+  processor: "./load-test-processor.js"
+  variables:
+    targetAddress: "0xb8552ec41cd7b5697464602d24d9c174f6fb863c"
+    testUrl: "http://localhost:8080/api"
+  
+  plugins:
+    statsd:
+      host: "localhost"
+      port: 8125
+      prefix: "deepclean"
+
+scenarios:
+  # Scenario 1: Populate Wallet Load
+  - name: "Populate Wallet Load"
+    weight: 60
+    flow:
+      - post:
+          url: "/api/populate-wallet"
+          json:
+            targetAddress: "{{ targetAddress }}"
+          expect:
+            - statusCode: 200
+              contentType: "json"
+          capture:
+            json: "$.onChainDigest"
+            as: "onChainDigest"
+      - think: 2
+  
+  # Scenario 2: Threat Analysis
+  - name: "Threat Analysis"
+    weight: 30
+    flow:
+      - post:
+          url: "/api/threats/analyze"
+          json:
+            objectId: "0xtest::threat"
+            objectType: "0xtest::fake::Token"
+            senderAddress: "0x8cb08623b2514d8e90994ac4800d5c05d01775dfec7e324150be638b74e9932e"
+            displayName: "Suspicious Token"
+            displayUrl: "https://suspicious.com"
+          expect:
+            - statusCode: 200
+              contentType: "json"
+          capture:
+            json: "$.riskScore"
+            as: "riskScore"
+      - think: 1
+  
+  # Scenario 3: List Threats
+  - name: "List Threats"
+    weight: 10
+    flow:
+      - get:
+          url: "/api/threats?limit=50&verdict=MALICIOUS"
+          expect:
+            - statusCode: 200
+              contentType: "json"
+      - think: 2

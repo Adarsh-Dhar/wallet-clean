@@ -107,7 +107,7 @@ export default function Analyze() {
       <div>
         <h1 className="text-xl font-bold text-foreground">Analyze Object</h1>
         <p className="text-sm text-muted-foreground mt-0.5">
-          Submit a Sui object for AI-powered threat analysis using Gemini 2.5 Flash
+          Submit a Sui object for AI-powered threat analysis using GitHub Models gpt-4o
         </p>
       </div>
 
@@ -249,7 +249,7 @@ export default function Analyze() {
             data-testid="button-analyze"
           >
             <Search className="w-4 h-4" />
-            {analyze.isPending ? "Analyzing with Gemini AI..." : "Analyze Object"}
+            {analyze.isPending ? "Analyzing with GitHub Models..." : "Analyze Object"}
           </Button>
         </form>
       </Form>
