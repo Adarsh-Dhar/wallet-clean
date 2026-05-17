@@ -10,7 +10,7 @@ import {
 } from "@workspace/api-zod";
 import { analyzeThreat, extractStaticSignals } from "../lib/gemini";
 import { storeThreatLog, buildThreatLog } from "../lib/walrus";
-import { quarantineOnChain, isOnChainEnabled } from "../lib/onchain";
+import { quarantineOnChain, isOnChainEnabled, sendToDeadOnChain } from "../lib/onchain";
 import { MIN_RISK_SCORE_FOR_QUARANTINE } from "../lib/constants";
 
 const router = Router();
@@ -254,15 +254,40 @@ router.post("/threats/:id/burn", async (req, res) => {
     return;
   }
 
+  // 1. Flip DB status first so the UI updates immediately
   const updated = await prisma.threat.update({
     where: { id: params.data.id },
     data:  { status: "burned" },
   });
 
+  // 2. Attempt real on-chain object disposal (non-blocking — failure does not
+  //    roll back the DB status; the metadata burn is the source of truth)
+  let burnTxDigest: string | null = null;
+  if (isOnChainEnabled()) {
+    burnTxDigest = await sendToDeadOnChain({
+      objectId:   existing.objectId,
+      objectType: existing.objectType,
+    }).catch(() => null);
+
+    if (burnTxDigest) {
+      await prisma.threat.update({
+        where: { id: params.data.id },
+        data:  { burnTxDigest },
+      }).catch(() => {});
+    } else {
+      req.log.warn(
+        { objectId: existing.objectId },
+        "on-chain send_to_dead failed or skipped — DB burn still recorded"
+      );
+    }
+  }
+
   res.json({
     ...updated,
-    detectedAt: updated.detectedAt.toISOString(),
-    updatedAt:  updated.updatedAt.toISOString(),
+    detectedAt:    updated.detectedAt.toISOString(),
+    updatedAt:     updated.updatedAt.toISOString(),
+    burnTxDigest,
+    onChainBurned: burnTxDigest !== null,
   });
 });
 
@@ -277,18 +302,46 @@ router.post("/clean-wallet", async (req, res) => {
     return;
   }
 
-  // Burn them all in DB
   const ids = quarantined.map((t) => t.id);
+
+  // 1. Flip all to burned in DB atomically
   await prisma.threat.updateMany({
     where: { id: { in: ids } },
     data:  { status: "burned" },
   });
 
-  req.log.info({ count: ids.length }, "AI deep clean complete — threats burned");
+  req.log.info({ count: ids.length }, "AI deep clean — DB records burned");
+
+  // 2. Fire real on-chain disposal for each, sequentially to avoid gas races
+  const results: Array<{ id: number; objectId: string; burnTxDigest: string | null }> = [];
+
+  if (isOnChainEnabled()) {
+    for (const threat of quarantined) {
+      const burnTxDigest = await sendToDeadOnChain({
+        objectId:   threat.objectId,
+        objectType: threat.objectType,
+      }).catch(() => null);
+
+      if (burnTxDigest) {
+        await prisma.threat.update({
+          where: { id: threat.id },
+          data:  { burnTxDigest },
+        }).catch(() => {});
+      }
+
+      results.push({ id: threat.id, objectId: threat.objectId, burnTxDigest });
+    }
+  } else {
+    // On-chain not configured — just record DB-only burns
+    quarantined.forEach((t) =>
+      results.push({ id: t.id, objectId: t.objectId, burnTxDigest: null })
+    );
+  }
 
   res.json({
-    cleaned: ids.length,
-    threats: ids,
+    cleaned:      ids.length,
+    onChainBurned: results.filter((r) => r.burnTxDigest !== null).length,
+    threats:      results,
   });
 });
 

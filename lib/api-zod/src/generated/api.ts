@@ -153,8 +153,22 @@ export const BurnThreatResponse = zod.object({
   "status": zod.enum(['quarantined', 'released', 'burned']),
   "walrusBlobId": zod.string().nullish(),
   "quarantineTxDigest": zod.string().nullish(),
+  "burnTxDigest":  zod.string().nullish(),
+  "onChainBurned": zod.boolean().optional(),
   "detectedAt": zod.string(),
   "updatedAt": zod.string().optional()
+})
+
+export const CleanWalletResponseItem = zod.object({
+  "id":            zod.number(),
+  "objectId":      zod.string(),
+  "burnTxDigest":  zod.string().nullable(),
+})
+
+export const CleanWalletResponse = zod.object({
+  "cleaned":       zod.number(),
+  "onChainBurned": zod.number(),
+  "threats":       zod.array(CleanWalletResponseItem),
 })
 
 

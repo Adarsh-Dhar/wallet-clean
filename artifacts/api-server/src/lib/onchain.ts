@@ -330,3 +330,142 @@ export async function quarantineOnChain(
     return null;
   }
 }
+
+export interface SendToDeadParams {
+  objectId: string;       // the real on-chain Sui object ID to dispose of
+  objectType: string;     // full Move type, e.g. "0xabc::fake_nft::FakeNFT"
+}
+
+/**
+ * Build and execute a PTB that calls quarantine_vault::send_to_dead<T>
+ * on the real spam object, transferring it to 0x0 so it leaves the user's wallet.
+ *
+ * Works for any object with `key + store` (NFTs, fake tokens, spoofed positions).
+ * Does NOT work for objects that lack the `store` ability — those are truly
+ * indestructible by a third party and should only have their metadata burned.
+ *
+ * Returns the tx digest on success, null on failure.
+ */
+export async function sendToDeadOnChain(
+  params: SendToDeadParams
+): Promise<string | null> {
+  if (!isOnChainEnabled()) return null;
+
+  try {
+    const AGENT_PRIV_KEY = process.env["AGENT_PRIVATE_KEY"]!;
+    const PACKAGE_ID     = process.env["QUARANTINE_PACKAGE_ID"]!;
+    const ADMIN_CAP_ID   = process.env["QUARANTINE_ADMIN_CAP_ID"]!;
+
+    const keyBytes = parseAgentPrivateKey(AGENT_PRIV_KEY);
+    if (!keyBytes) return null;
+
+    const keypair      = Ed25519Keypair.fromSecretKey(keyBytes);
+    const agentAddress = keypair.getPublicKey().toSuiAddress();
+    const client       = getClient();
+
+    const tx = new Transaction();
+    tx.setSender(agentAddress);
+    tx.setGasBudget(10_000_000);
+
+    // The spam object must be passed as an owned object input.
+    // If the agent wallet does not own it, this tx will fail — that is correct
+    // behaviour (you can only dispose of objects you own or that are shared).
+    tx.moveCall({
+      target: `${PACKAGE_ID}::quarantine_vault::send_to_dead`,
+      typeArguments: [params.objectType],
+      arguments: [
+        tx.object(ADMIN_CAP_ID),
+        tx.object(params.objectId),
+      ],
+    });
+
+    const result = await client.signAndExecuteTransaction({
+      signer:      keypair,
+      transaction: tx,
+      options: { showEffects: true },
+    });
+
+    if (result.effects?.status?.status !== "success") {
+      logger.warn(
+        { objectId: params.objectId, err: result.effects?.status?.error },
+        "send_to_dead PTB failed"
+      );
+      return null;
+    }
+
+    logger.info({ digest: result.digest, objectId: params.objectId }, "Object sent to dead address");
+    return result.digest;
+  } catch (err) {
+    logger.warn({ err, objectId: params.objectId }, "sendToDeadOnChain failed (non-fatal)");
+    return null;
+  }
+}
+
+
+export interface MergeDustParams {
+  coinType: string;         // e.g. "0x2::sui::SUI" or the full coin type
+  primaryCoinId: string;    // object ID of the primary coin to merge into
+  dustCoinIds: string[];    // object IDs of all dust coins to merge and dispose
+}
+
+/**
+ * Build and execute a PTB that merges all dust coins into a primary coin
+ * then sends the combined coin to 0x0, cleaning dust in one transaction.
+ *
+ * The agent wallet must own all the coins listed. In practice this means
+ * you first need a TransferObjects PTB to pull them from the user's wallet
+ * to the agent — or the user signs the merge tx themselves via the frontend.
+ */
+export async function mergeDustOnChain(
+  params: MergeDustParams
+): Promise<string | null> {
+  if (!isOnChainEnabled()) return null;
+  if (params.dustCoinIds.length === 0) return null;
+
+  try {
+    const AGENT_PRIV_KEY = process.env["AGENT_PRIVATE_KEY"]!;
+    const PACKAGE_ID     = process.env["QUARANTINE_PACKAGE_ID"]!;
+    const ADMIN_CAP_ID   = process.env["QUARANTINE_ADMIN_CAP_ID"]!;
+
+    const keyBytes = parseAgentPrivateKey(AGENT_PRIV_KEY);
+    if (!keyBytes) return null;
+
+    const keypair      = Ed25519Keypair.fromSecretKey(keyBytes);
+    const agentAddress = keypair.getPublicKey().toSuiAddress();
+    const client       = getClient();
+
+    const tx = new Transaction();
+    tx.setSender(agentAddress);
+    tx.setGasBudget(15_000_000);
+
+    tx.moveCall({
+      target: `${PACKAGE_ID}::quarantine_vault::merge_and_send_dust`,
+      typeArguments: [params.coinType],
+      arguments: [
+        tx.object(ADMIN_CAP_ID),
+        tx.object(params.primaryCoinId),
+        tx.makeMoveVec({
+          type: `0x2::coin::Coin<${params.coinType}>`,
+          elements: params.dustCoinIds.map((id) => tx.object(id)),
+        }),
+      ],
+    });
+
+    const result = await client.signAndExecuteTransaction({
+      signer:      keypair,
+      transaction: tx,
+      options: { showEffects: true },
+    });
+
+    if (result.effects?.status?.status !== "success") {
+      logger.warn({ err: result.effects?.status?.error }, "merge_and_send_dust PTB failed");
+      return null;
+    }
+
+    logger.info({ digest: result.digest, coinType: params.coinType }, "Dust coins merged and sent to dead address");
+    return result.digest;
+  } catch (err) {
+    logger.warn({ err }, "mergeDustOnChain failed (non-fatal)");
+    return null;
+  }
+}

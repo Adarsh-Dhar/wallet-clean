@@ -17,6 +17,8 @@
 module deepclean::quarantine_vault {
     use sui::event;
     use std::string::{Self, String};
+    use std::vector;
+    use sui::coin::{Self, Coin};
 
     // ────────────────────────────────────────────────────────────────────────
     // Errors
@@ -161,6 +163,42 @@ module deepclean::quarantine_vault {
             asset_id: object::id(asset),
             object_id: asset.object_id,
         });
+    }
+
+    // ── Dead-address sink (used for actual object disposal) ───────────────
+    const DEAD_ADDRESS: address = @0x0;
+
+    /// Transfer a spam object to the dead address so it leaves the user's wallet.
+    /// The caller must pass the object as a generic with `store` ability.
+    /// This is a separate entry from `burn()` — burn() only marks the metadata
+    /// record; this function moves the real object off-chain.
+    public entry fun send_to_dead<T: key + store>(
+        _cap: &AdminCap,
+        obj: T,
+        _ctx: &mut TxContext,
+    ) {
+        transfer::public_transfer(obj, DEAD_ADDRESS);
+    }
+
+    use sui::coin as coin;
+
+    /// Merge all dust coins into the primary coin then send the combined
+    /// amount to the dead address, effectively removing all dust in one PTB.
+    /// `primary` is the coin that absorbs the others; `dusts` is the remainder.
+    public entry fun merge_and_send_dust<T>(
+        _cap: &AdminCap,
+        mut primary: Coin<T>,
+        dusts: vector<Coin<T>>,
+        _ctx: &mut TxContext,
+    ) {
+        let mut i = 0;
+        let len = vector::length(&dusts);
+        while (i < len) {
+            coin::join(&mut primary, vector::pop_back(&mut dusts));
+            i = i + 1;
+        };
+        vector::destroy_empty(dusts);
+        transfer::public_transfer(primary, DEAD_ADDRESS);
     }
 
     // ────────────────────────────────────────────────────────────────────────

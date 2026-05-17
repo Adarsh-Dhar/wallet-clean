@@ -26,6 +26,7 @@ model Threat {
   status             String    @default("quarantined") // "quarantined" | "released" | "burned"
   walrusBlobId       String?   @map("walrus_blob_id")
   quarantineTxDigest String?   @map("quarantine_tx_digest")
+  burnTxDigest       String?   @map("burn_tx_digest")
   detectedAt         DateTime  @default(now()) @map("detected_at")
   updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
 
