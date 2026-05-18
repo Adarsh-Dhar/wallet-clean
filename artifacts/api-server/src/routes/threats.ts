@@ -304,17 +304,24 @@ router.post("/clean-wallet", async (req, res) => {
 
   const requestedIds = [...new Set(body.data.threatIds)];
   const digest = body.data.burnTxDigest;
+  const authAddress = res.locals.authSession?.address;
 
   const quarantined = await prisma.threat.findMany({
     where: {
       id: { in: requestedIds },
       status: "quarantined",
+      ...(authAddress ? { walletAddress: { equals: authAddress, mode: "insensitive" } } : {}),
     },
     select: {
       id: true,
       objectId: true,
     },
   });
+
+  if (authAddress && quarantined.length < requestedIds.length) {
+    res.status(403).json({ error: "Access denied: Not all threats belong to your wallet" });
+    return;
+  }
 
   if (quarantined.length === 0) {
     res.json({ cleaned: 0, onChainBurned: 0, threats: [] });

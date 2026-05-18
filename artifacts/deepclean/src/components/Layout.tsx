@@ -3,6 +3,7 @@ import { Shield, LayoutDashboard, AlertTriangle, Search, Wallet, Activity, Lock,
 import { ConnectButton } from "@mysten/dapp-kit";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useEffect, useState } from "react";
+import { useListThreats } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/components/AuthProvider";
@@ -23,6 +24,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
   const [hasEthereum, setHasEthereum] = useState(false);
   const [hasSolana, setHasSolana] = useState(false);
+
+  const { data: threats } = useListThreats({ status: "quarantined", limit: 100 });
+  const quarantinedCount = Array.isArray(threats) ? threats.length : 0;
 
   useEffect(() => {
     setHasEthereum(typeof (window as any).ethereum !== "undefined");
@@ -92,7 +96,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               >
                 <Icon className="w-4 h-4 shrink-0" />
                 {label}
-                {active && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
+                 {label === "Threats" && quarantinedCount > 0 ? (
+                   <span className="ml-auto min-w-[18px] h-[18px] rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center px-1">
+                     {quarantinedCount > 99 ? "99+" : quarantinedCount}
+                   </span>
+                 ) : active && label !== "Threats" ? (
+                   <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
+                 ) : null}
               </Link>
             );
           })}

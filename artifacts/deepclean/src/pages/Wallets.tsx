@@ -210,6 +210,7 @@ export default function Wallets() {
   const [deleteLogs, setDeleteLogs] = useState<Record<number, LogEntry[]>>({});
   const [openSeedLog, setOpenSeedLog]     = useState<number | null>(null);
   const [openDeleteLog, setOpenDeleteLog] = useState<number | null>(null);
+  const [cleanedState, setCleanedState] = useState<Record<number, { count: number; digest: string } | null>>({});
 
   function appendSeedLog(walletId: number, entry: LogEntry) {
     setSeedLogs((prev) => ({ ...prev, [walletId]: [...(prev[walletId] ?? []), entry] }));
@@ -351,7 +352,7 @@ export default function Wallets() {
     },
   });
 
-  async function performDeepClean(walletId: number, walletAddress: string) {
+  async function performDeepClean(walletId: number, walletAddress: string): Promise<{ cleaned: number; digest: string } | false | true> {
     appendSeedLog(walletId, mkLog("info", "  Fetching quarantined threats from DB for wallet…"));
 
     const threats = await apiJson<QuarantinedThreat[]>(
@@ -403,24 +404,31 @@ export default function Wallets() {
     }
 
     cleanResult.threats.forEach((threat, i) => {
-      appendSeedLog(walletId, mkLog("success", `  [${i + 1}] Threat #${threat.id} → burned`, `       ${threat.objectId}`));
+      appendSeedLog(walletId, mkLog("success", `  [${i + 1}] Threat #${threat.id} → burned 🔥`, `       ${threat.objectId}`));
     });
 
-    appendSeedLog(walletId, mkLog("success", `✓ Deep clean complete — ${cleanResult.cleaned} threats burned`));
-    return true;
+    appendSeedLog(walletId, mkLog("success", `✓ Deep clean complete — ${cleanResult.cleaned} threats burned 🔥`));
+    return { cleaned: cleanResult.cleaned, digest };
   }
 
   async function handleClean(wallet: WalletRow) {
     const walletId = wallet.id ?? -1;
     setOpenSeedLog(walletId);
-    // Ensure log array exists and append a separator
     setSeedLogs((prev) => ({ ...prev, [walletId]: [...(prev[walletId] ?? []), mkLog("info", "───")] }));
     setCleaningId(walletId);
     appendSeedLog(walletId, mkLog("info", `Target: ${wallet.address}`));
 
     try {
-      const success = await performDeepClean(walletId, wallet.address);
-      if (success) {
+      const cleanResult = await performDeepClean(walletId, wallet.address);
+      if (cleanResult && typeof cleanResult === "object" && cleanResult.cleaned > 0) {
+        setCleanedState(prev => ({ ...prev, [walletId]: { count: cleanResult.cleaned, digest: cleanResult.digest } }));
+        setTimeout(() => {
+          setCleanedState(prev => ({ ...prev, [walletId]: null }));
+        }, 6000);
+        queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+        queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
+        toast({ title: "Deep clean finished", description: `${wallet.label} cleaned` });
+      } else if (cleanResult === true) {
         queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
         queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
         toast({ title: "Deep clean finished", description: `${wallet.label} cleaned` });
@@ -605,8 +613,29 @@ export default function Wallets() {
         {isLoading ? (
           Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-20 rounded-lg" />)
         ) : mergedWallets.length > 0 ? (
-          mergedWallets.map((wallet) => (
+          mergedWallets.map((wallet) => {
+            const isCelebrating = cleanedState[wallet.id];
+            return (
             <div key={wallet.id} className="space-y-2">
+              {/* Celebration card overlay */}
+              {isCelebrating && (
+                <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-6 flex items-center gap-4 animate-in fade-in duration-300">
+                  <Shield className="w-8 h-8 text-green-400 animate-pulse" />
+                  <div className="flex-1">
+                    <div className="font-bold text-green-300 text-lg">Wallet Clean</div>
+                    <div className="text-sm text-green-400/80">{isCelebrating.count} threats permanently burned 🔥</div>
+                  </div>
+                  <a
+                    href={`https://suiscan.xyz/testnet/tx/${isCelebrating.digest}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-green-400 hover:underline flex items-center gap-1 whitespace-nowrap"
+                  >
+                    View tx <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              )}
+              
               {/* Wallet card */}
               <div
                 data-testid={`card-wallet-${wallet.id}`}
@@ -745,7 +774,8 @@ export default function Wallets() {
                 />
               )}
             </div>
-          ))
+            );
+          })
         ) : (
           <div className="rounded-lg border border-border bg-card p-10 text-center">
             <Wallet className="w-8 h-8 text-muted-foreground mx-auto mb-3" />

@@ -1,5 +1,6 @@
 import { useGetDashboardStats, useGetRecentActivity, useGetRiskBreakdown } from "@workspace/api-client-react";
 import { Shield, AlertTriangle, Flame, Unlock, Wallet, TrendingUp } from "lucide-react";
+import { Link } from "wouter";
 import { Skeleton } from "@/components/ui/skeleton";
 import { VerdictBadge } from "@/components/ThreatBadge";
 import {
@@ -72,6 +73,30 @@ export default function Dashboard() {
           <StatCard icon={Wallet} label="Wallets Monitored" value={stats.walletsMonitored} color="bg-violet-500/20 text-violet-400" testId="stat-wallets" />
         </div>
       ) : null}
+
+      {/* Warning banner if quarantined > 0 */}
+      {stats && stats.quarantined > 0 && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 flex items-center gap-3">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+          <span className="text-sm text-amber-300">
+            {stats.quarantined} threat{stats.quarantined !== 1 ? "s" : ""} quarantined
+          </span>
+          <Link href="/wallets" className="ml-auto text-xs text-amber-400 hover:underline">
+            Clean now →
+          </Link>
+        </div>
+      )}
+
+      {/* All clear state if quarantined === 0 and burned > 0 */}
+      {stats && stats.quarantined === 0 && stats.burned > 0 && (
+        <div className="rounded-lg border border-green-500/30 bg-green-500/10 px-6 py-5 flex items-center gap-4">
+          <Shield className="w-8 h-8 text-green-400 animate-pulse" />
+          <div>
+            <div className="font-bold text-green-300 text-lg">All Clear</div>
+            <div className="text-sm text-green-400/80">{stats.burned} threat{stats.burned !== 1 ? "s" : ""} neutralized — wallets are clean</div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Risk breakdown chart */}

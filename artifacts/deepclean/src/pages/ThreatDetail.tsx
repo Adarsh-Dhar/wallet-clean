@@ -82,7 +82,15 @@ export default function ThreatDetail() {
             <VerdictBadge verdict={threat.verdict} />
             <StatusBadge status={threat.status} />
           </div>
-          <h1 className="text-lg font-bold text-foreground font-mono mt-2">{threat.objectId}</h1>
+          <a
+            href={`https://suiscan.xyz/testnet/object/${threat.objectId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-lg font-bold text-foreground font-mono mt-2 hover:underline flex items-center gap-2 w-fit"
+          >
+            {threat.objectId}
+            <ExternalLink className="w-4 h-4" />
+          </a>
           <div className="text-sm text-muted-foreground mt-1 font-mono">{threat.objectType}</div>
         </div>
         {threat.status === "quarantined" && (
@@ -201,7 +209,27 @@ export default function ThreatDetail() {
             {threat.quarantineTxDigest && (
               <div>
                 <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Quarantine TX</div>
-                <div className="font-mono text-xs text-foreground break-all">{threat.quarantineTxDigest}</div>
+                <a
+                  href={`https://suiscan.xyz/testnet/tx/${threat.quarantineTxDigest}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-xs text-primary hover:underline flex items-center gap-1 break-all"
+                >
+                  {threat.quarantineTxDigest} <ExternalLink className="w-3 h-3 shrink-0" />
+                </a>
+              </div>
+            )}
+            {threat.burnTxDigest && (
+              <div>
+                <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Burn TX</div>
+                <a
+                  href={`https://suiscan.xyz/testnet/tx/${threat.burnTxDigest}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-xs text-red-400 hover:underline flex items-center gap-1 break-all"
+                >
+                  {threat.burnTxDigest} <ExternalLink className="w-3 h-3 shrink-0" />
+                </a>
               </div>
             )}
           </div>

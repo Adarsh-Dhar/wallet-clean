@@ -12,6 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 export default function Threats() {
   const [verdict, setVerdict] = useState<string>("all");
   const [status, setStatus] = useState<string>("all");
+  const [burningIds, setBurningIds] = useState<Set<number>>(new Set());
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -39,7 +40,14 @@ export default function Threats() {
 
   const burn = useBurnThreat({
     mutation: {
-      onSuccess: () => {
+      onSuccess: (data, variables) => {
+        setTimeout(() => {
+          setBurningIds(prev => {
+            const next = new Set(prev);
+            next.delete(variables.id);
+            return next;
+          });
+        }, 350);
         queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
         toast({ title: "Asset burned", description: "The malicious asset has been permanently destroyed." });
       },
@@ -123,17 +131,18 @@ export default function Threats() {
                 <tr
                   key={t.id}
                   data-testid={`row-threat-${t.id}`}
-                  className="border-b border-border/50 hover:bg-muted/20 transition-colors"
+                  className={`border-b border-border/50 hover:bg-muted/20 transition-all duration-300 ${burningIds.has(t.id) ? "opacity-0 scale-95 bg-red-500/10" : ""}`}
                 >
                   <td className="px-4 py-3">
-                    <button
-                      onClick={() => setLocation(`/threats/${t.id}`)}
+                    <a
+                      href={`https://suiscan.xyz/testnet/object/${t.objectId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
                       className="font-mono text-xs text-primary hover:underline flex items-center gap-1"
-                      data-testid={`link-threat-${t.id}`}
                     >
                       {t.objectId.slice(0, 16)}…
                       <ExternalLink className="w-3 h-3" />
-                    </button>
+                    </a>
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground font-mono truncate max-w-35">
                     {t.objectType.split("::").pop()}
@@ -161,13 +170,26 @@ export default function Threats() {
                           size="sm"
                           variant="outline"
                           className="h-7 text-xs gap-1.5 text-red-400 border-red-500/30 hover:bg-red-500/10"
-                          onClick={() => burn.mutate({ id: t.id })}
+                          onClick={() => {
+                            setBurningIds(prev => new Set([...prev, t.id]));
+                            burn.mutate({ id: t.id });
+                          }}
                           disabled={burn.isPending}
                           data-testid={`button-burn-${t.id}`}
                         >
                           <Flame className="w-3 h-3" /> Burn
                         </Button>
                       </div>
+                    )}
+                    {t.status === "burned" && t.burnTxDigest && (
+                      <a
+                        href={`https://suiscan.xyz/testnet/tx/${t.burnTxDigest}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-red-400 hover:underline flex items-center gap-1"
+                      >
+                        View burn tx <ExternalLink className="w-3 h-3" />
+                      </a>
                     )}
                   </td>
                 </tr>
