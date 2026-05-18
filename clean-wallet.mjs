@@ -186,10 +186,10 @@ async function main() {
   }
 
   const tx = new Transaction();
-  const deadAddress = "0x0"; // Use properly formatted dead address
+  const deadAddress = "0x0000000000000000000000000000000000000000000000000000000000000000";
   tx.transferObjects(
     validThreats.map((t) => tx.object(t.objectId)),
-    deadAddress
+    tx.pure.address(deadAddress)
   );
 
   // ── 4. Sign and execute on-chain ───────────────────────────────────────────

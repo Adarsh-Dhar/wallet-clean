@@ -386,11 +386,67 @@ export default function Wallets() {
       appendSeedLog(walletId, mkLog("warn", `  Warning: ${threats.length - validThreats.length} threat(s) skipped due to missing objectId`));
     }
 
+      const deadAddress = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+    appendSeedLog(walletId, mkLog("info", "  Verifying object ownership before building PTB…"));
+
+    // Browser-friendly RPC check: call the Sui JSON-RPC `sui_getObject` method
+    const rpcUrl = (import.meta as any)?.env?.VITE_SUI_RPC_URL || "https://fullnode.testnet.sui.io:443";
+    async function fetchObject(id: string) {
+      try {
+        const resp = await fetch(rpcUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "sui_getObject", params: [id] }),
+        });
+        const payload = await resp.json();
+        if (!payload || payload.error) return null;
+        return payload.result;
+      } catch {
+        return null;
+      }
+    }
+
+    const resolvableObjects: string[] = [];
+    for (const threat of validThreats) {
+      try {
+        const obj = await fetchObject(threat.objectId);
+        if (!obj) {
+          appendSeedLog(walletId, mkLog("warn", `  Skipping missing object: ${threat.objectId}`));
+          continue;
+        }
+
+        // `sui_getObject` result shapes vary; check common fields for existence
+        const status = (obj as any).status || (obj as any).exists || null;
+        if (status && String(status).toLowerCase() !== "exists") {
+          appendSeedLog(walletId, mkLog("warn", `  Skipping non-existent object: ${threat.objectId}`));
+          continue;
+        }
+
+        // Try to read the owner from a few possible locations; if present, verify match
+        const details = (obj as any).details || (obj as any).data || {};
+        const owner = details?.owner?.Address || details?.owner?.address || details?.owner || details?.ownerAddress;
+        if (owner && String(owner).toLowerCase() !== walletAddress.toLowerCase()) {
+          appendSeedLog(walletId, mkLog("warn", `  Skipping object not owned by wallet: ${threat.objectId}`));
+          continue;
+        }
+
+        resolvableObjects.push(threat.objectId);
+      } catch (err) {
+        appendSeedLog(walletId, mkLog("warn", `  Error fetching object ${threat.objectId} — skipping`));
+        continue;
+      }
+    }
+
+    if (resolvableObjects.length === 0) {
+      appendSeedLog(walletId, mkLog("error", "  No valid objects remain to burn after verification"));
+      return false;
+    }
+
     const tx = new Transaction();
-    const deadAddress = "0x0"; // Use properly formatted dead address
     tx.transferObjects(
-      validThreats.map((threat) => tx.object(threat.objectId)),
-      deadAddress,
+      resolvableObjects.map((id) => tx.object(id)),
+      tx.pure.address(deadAddress),
     );
 
     appendSeedLog(walletId, mkLog("info", "  Wallet popup opening — please approve the transaction…"));

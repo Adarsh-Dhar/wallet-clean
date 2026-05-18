@@ -188,9 +188,9 @@ async function main() {
 
       const tx = new Transaction();
       const objectsToTransfer = validThreats.map((t) => tx.object(t.objectId));
-      const deadAddress = "0x0"; // Use properly formatted dead address
-      
-      tx.transferObjects(objectsToTransfer, deadAddress);
+      const deadAddress = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+      tx.transferObjects(objectsToTransfer, tx.pure.address(deadAddress));
 
       console.log("    ⛓️  Signing and executing on-chain...");
       const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl(network), network });
