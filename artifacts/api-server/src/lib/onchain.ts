@@ -18,6 +18,7 @@ import { Transaction } from "@mysten/sui/transactions";
 import { bcs } from "@mysten/sui/bcs";
 // In @mysten/sui v2.x, SuiClient is SuiJsonRpcClient and lives in @mysten/sui/jsonRpc
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
+import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { logger } from "./logger";
 
 // NOTE: Do NOT read env vars here — they may not be loaded yet!
@@ -97,72 +98,23 @@ function tryBase64Decode(s: string): Uint8Array | null {
   }
 }
 
-/** Decode Bech32 format (used by suiprivkey1...) */
-function decodeBech32(encoded: string): Uint8Array | null {
-  if (!encoded.match(/^[a-z0-9]{6,}1[ac-hj-np-z02-9]{58,}$/i)) {
-    return null;
-  }
-  
-  const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-  const decoded = encoded.toLowerCase();
-  const lastOne = decoded.lastIndexOf("1");
-  
-  if (lastOne < 1 || lastOne + 7 > decoded.length || decoded.length > 90) {
-    return null;
-  }
-  
-  const hrp = decoded.substring(0, lastOne);
-  const data = decoded.substring(lastOne + 1);
-  
-  // Decode data part
-  const decodedData: number[] = [];
-  for (const char of data) {
-    const d = CHARSET.indexOf(char);
-    if (d < 0) return null;
-    decodedData.push(d);
-  }
-  
-  // Extract the key bytes (skip checksum: last 6 characters = 30 bits)
-  const keyLengthInBits = (decodedData.length - 6) * 5;
-  const keyLengthInBytes = Math.floor(keyLengthInBits / 8);
-  
-  const result: number[] = [];
-  let accumulator = 0;
-  let bits = 0;
-  
-  for (let i = 0; i < decodedData.length - 6; i++) {
-    accumulator = (accumulator << 5) | decodedData[i];
-    bits += 5;
-    
-    if (bits >= 8) {
-      bits -= 8;
-      result.push((accumulator >> bits) & 0xff);
-    }
-  }
-  
-  return result.length >= 32 ? new Uint8Array(result.slice(0, 32)) : null;
-}
-
 /**
- * Parse various AGENT_PRIVATE_KEY formats into a Uint8Array secret key.
- * Supported formats:
- *  - suiprivkey1... (Bech32 encoded Sui private key)
- *  - 0x-prefixed hex string
- *  - raw hex string
- *  - base64 encoded bytes
- *  - JSON blob exported by some key tools (object with `secretKey` array or string)
- *  - comma-separated decimal byte list
+ * Parse AGENT_PRIVATE_KEY using official @mysten/sui decodeSuiPrivateKey for suiprivkey1... format,
+ * with fallbacks for hex/base64.
  */
 function parseAgentPrivateKey(raw: string): Uint8Array | null {
   if (!raw) return null;
   const s = raw.trim();
 
-  // suiprivkey1... (Bech32 format)
+  // suiprivkey1... (official Sui format) — use official SDK decoder
   if (s.startsWith("suiprivkey1")) {
-    const decoded = decodeBech32(s);
-    if (decoded && decoded.length >= 32) {
+    try {
+      const { secretKey } = decodeSuiPrivateKey(s);
       logger.debug("Successfully parsed AGENT_PRIVATE_KEY as suiprivkey1 format");
-      return decoded;
+      return secretKey;
+    } catch (e) {
+      logger.warn({ err: e }, "Failed to decode suiprivkey1 format");
+      return null;
     }
   }
 
@@ -262,9 +214,36 @@ export async function quarantineOnChain(
     const agentAddress = keypair.getPublicKey().toSuiAddress();
     const client      = getClient();
 
+    // Explicitly fetch and select a gas coin
+    logger.debug({ address: agentAddress }, "Fetching available gas coins...");
+    const coinsResponse = await client.getCoins({
+      owner: agentAddress,
+      coinType: "0x2::sui::SUI",
+      limit: 10,
+    });
+
+    if (!coinsResponse.data || coinsResponse.data.length === 0) {
+      logger.error(
+        { address: agentAddress },
+        "No SUI coins available for gas — account may be out of funds"
+      );
+      return null;
+    }
+
+    // Use the first coin with balance > 0
+    const gasCoin = coinsResponse.data[0];
+    if (!gasCoin.balance || BigInt(gasCoin.balance) < 1_000_000n) {
+      logger.warn(
+        { coin: gasCoin.coinObjectId, balance: gasCoin.balance },
+        "Selected gas coin has very low balance"
+      );
+    }
+
     const tx = new Transaction();
     tx.setSender(agentAddress);
     tx.setGasBudget(10_000_000);
+    // Explicitly set the gas coin to avoid auto-selection issues
+    tx.setGasPayment([{ objectId: gasCoin.coinObjectId, version: gasCoin.version, digest: gasCoin.digest }]);
 
     // Normalize sender address — must be a full 32-byte 0x-prefixed hex
     const senderAddr = params.senderAddress.startsWith("0x")
@@ -274,12 +253,12 @@ export async function quarantineOnChain(
     tx.moveCall({
       target: `${PACKAGE_ID}::quarantine_vault::quarantine`,
       arguments: [
-        // _cap: &AdminCap — pass the object by reference
+        // _cap: &mut AdminCap — pass the object by mutable reference
         tx.object(ADMIN_CAP_ID!),
-        // object_id: vector<u8>
-        tx.pure(bcs.vector(bcs.u8()).serialize(toBytes(params.objectId))),
-        // object_type: vector<u8>
-        tx.pure(bcs.vector(bcs.u8()).serialize(toBytes(params.objectType))),
+        // object_id: vector<u8> — explicitly construct vector<u8>
+        tx.pure.vector("u8", toBytes(params.objectId)),
+        // object_type: vector<u8> — explicitly construct vector<u8>
+        tx.pure.vector("u8", toBytes(params.objectType)),
         // sender_address: address
         tx.pure.address(senderAddr),
         // risk_score: u8
@@ -290,12 +269,23 @@ export async function quarantineOnChain(
         tx.pure.u8(Math.min(255, Math.max(0, params.reasonCode))),
         // confidence_pct: u8  (0.0-1.0 → 0-100)
         tx.pure.u8(Math.min(100, Math.max(0, Math.round(params.confidence * 100)))),
-        // walrus_blob_id: vector<u8>
-        tx.pure(bcs.vector(bcs.u8()).serialize(toBytes(params.walrusBlobId))),
+        // walrus_blob_id: vector<u8> — explicitly construct vector<u8>
+        tx.pure.vector("u8", toBytes(params.walrusBlobId)),
       ],
     });
 
     logger.info({ objectId: params.objectId, network: SUI_NETWORK }, "Recording on-chain quarantine…");
+
+    // Diagnostic logging: dump params and the built transaction to help
+    // diagnose ArgumentWithoutValue / missing-argument errors.
+    try {
+      logger.debug({ params }, "quarantineOnChain input params");
+      // Transaction.toJSON() is async in some SDK versions — call defensively
+      const txJson = typeof (tx as any).toJSON === "function" ? await (tx as any).toJSON() : (tx as any).serialize?.() ?? null;
+      logger.debug({ tx: txJson }, "quarantineOnChain built PTB (serialized)");
+    } catch (e) {
+      logger.debug({ err: e }, "Failed to serialize PTB for debug output");
+    }
 
     // Sign and submit — this is the real on-chain call
     const result = await client.signAndExecuteTransaction({
@@ -305,6 +295,13 @@ export async function quarantineOnChain(
         showEffects: true,
       },
     });
+
+    // Log full result for diagnostics (may include CommandArgumentError)
+    try {
+      logger.debug({ result }, "quarantineOnChain signAndExecuteTransaction result (raw)");
+    } catch (e) {
+      logger.debug({ err: e }, "Failed to log transaction result");
+    }
 
     const digest = result.digest;
 

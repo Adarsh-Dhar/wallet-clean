@@ -446,7 +446,7 @@ export default function Wallets() {
     const tx = new Transaction();
     tx.transferObjects(
       resolvableObjects.map((id) => tx.object(id)),
-      tx.pure.address(deadAddress),
+      deadAddress,
     );
 
     appendSeedLog(walletId, mkLog("info", "  Wallet popup opening — please approve the transaction…"));
