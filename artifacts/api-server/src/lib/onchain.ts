@@ -15,6 +15,7 @@
 
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction } from "@mysten/sui/transactions";
+import { bcs } from "@mysten/sui/bcs";
 // In @mysten/sui v2.x, SuiClient is SuiJsonRpcClient and lives in @mysten/sui/jsonRpc
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { logger } from "./logger";
@@ -276,9 +277,9 @@ export async function quarantineOnChain(
         // _cap: &AdminCap — pass the object by reference
         tx.object(ADMIN_CAP_ID!),
         // object_id: vector<u8>
-        tx.pure.vector("u8", toBytes(params.objectId)),
+        tx.pure(bcs.vector(bcs.u8()).serialize(toBytes(params.objectId))),
         // object_type: vector<u8>
-        tx.pure.vector("u8", toBytes(params.objectType)),
+        tx.pure(bcs.vector(bcs.u8()).serialize(toBytes(params.objectType))),
         // sender_address: address
         tx.pure.address(senderAddr),
         // risk_score: u8
@@ -290,7 +291,7 @@ export async function quarantineOnChain(
         // confidence_pct: u8  (0.0-1.0 → 0-100)
         tx.pure.u8(Math.min(100, Math.max(0, Math.round(params.confidence * 100)))),
         // walrus_blob_id: vector<u8>
-        tx.pure.vector("u8", toBytes(params.walrusBlobId)),
+        tx.pure(bcs.vector(bcs.u8()).serialize(toBytes(params.walrusBlobId))),
       ],
     });
 

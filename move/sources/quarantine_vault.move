@@ -95,8 +95,8 @@ module deepclean::quarantine_vault {
     // ────────────────────────────────────────────────────────────────────────
     // Quarantine — agent calls this after AI analysis flags a threat
     // ────────────────────────────────────────────────────────────────────────
-    public fun quarantine(
-        _cap: &AdminCap,
+    public entry fun quarantine(
+        _cap: &mut AdminCap,
         object_id: vector<u8>,
         object_type: vector<u8>,
         sender_address: address,
@@ -106,7 +106,7 @@ module deepclean::quarantine_vault {
         confidence_pct: u8,
         walrus_blob_id: vector<u8>,
         ctx: &mut TxContext,
-    ): ID {
+    ) {
         let asset = QuarantinedAsset {
             id: object::new(ctx),
             object_id: string::utf8(object_id),
@@ -130,14 +130,13 @@ module deepclean::quarantine_vault {
         });
 
         transfer::share_object(asset);
-        asset_id
     }
 
     // ────────────────────────────────────────────────────────────────────────
     // Release — owner reviewed and cleared the asset
     // ────────────────────────────────────────────────────────────────────────
-    public fun release(
-        _cap: &AdminCap,
+    public entry fun release(
+        _cap: &mut AdminCap,
         asset: &mut QuarantinedAsset,
     ) {
         assert!(asset.status == STATUS_QUARANTINED, ENotQuarantined);
@@ -151,8 +150,8 @@ module deepclean::quarantine_vault {
     // ────────────────────────────────────────────────────────────────────────
     // Burn — permanently mark as destroyed (object stays on chain, status = 2)
     // ────────────────────────────────────────────────────────────────────────
-    public fun burn(
-        _cap: &AdminCap,
+    public entry fun burn(
+        _cap: &mut AdminCap,
         asset: &mut QuarantinedAsset,
     ) {
         assert!(asset.status == STATUS_QUARANTINED, ENotQuarantined);
@@ -171,7 +170,7 @@ module deepclean::quarantine_vault {
     /// This is a separate entry from `burn()` — burn() only marks the metadata
     /// record; this function moves the real object off-chain.
     public entry fun send_to_dead<T: key + store>(
-        _cap: &AdminCap,
+        _cap: &mut AdminCap,
         obj: T,
         _ctx: &mut TxContext,
     ) {
@@ -182,7 +181,7 @@ module deepclean::quarantine_vault {
     /// amount to the dead address, effectively removing all dust in one PTB.
     /// `primary` is the coin that absorbs the others; `dusts` is the remainder.
     public entry fun merge_and_send_dust<T>(
-        _cap: &AdminCap,
+        _cap: &mut AdminCap,
         mut primary: Coin<T>,
         mut dusts: vector<Coin<T>>,
         _ctx: &mut TxContext,
