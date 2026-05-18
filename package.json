@@ -10,6 +10,9 @@
   },
   "private": true,
   "devDependencies": {
+    "@mysten/bcs": "^2.0.5",
+    "@mysten/sui": "^2.16.3",
+    "@mysten/sui.js": "^0.54.1",
     "prettier": "^3.8.3",
     "typescript": "~5.9.3"
   },

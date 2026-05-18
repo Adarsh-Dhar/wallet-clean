@@ -117,60 +117,68 @@ async function fetchRealSpamObjects(client: SuiJsonRpcClient): Promise<ChainObje
   const results: ChainObject[] = [];
 
   try {
-    // Fetch all objects owned by the spam wallet
-    const owned = await client.getOwnedObjects({
-      owner: SPAM_WALLET,
-      options: {
-        showType:    true,
-        showDisplay: true,
-        showContent: true,
-      },
-    });
-
-    for (const item of owned.data) {
-      const obj = item.data;
-      if (!obj || !obj.objectId || !obj.type) continue;
-
-      // Skip system/gas objects (0x2::coin::Coin<0x2::sui::SUI> from framework)
-      // unless they came from the spammer address (dust attack)
-      const isCoinSUI = obj.type.includes("0x2::coin::Coin");
-      const isDisplayOrPub =
-        obj.type.includes("::display::Display") ||
-        obj.type.includes("::package::Publisher") ||
-        obj.type.includes("::package::UpgradeCap");
-
-      if (isDisplayOrPub) continue;  // skip publishing artifacts
-
-      // Determine sender: for dust it's the spammer, for minted objects it's our wallet
-      const sender = isCoinSUI ? SPAMMER_ADDRESS : SPAM_WALLET;
-
-      // Look up enriched metadata by type
-      const baseType = obj.type.replace(/<.*>/, ""); // strip generic params
-      const meta = KNOWN_OBJECT_META[baseType];
-
-      // Pull display fields from on-chain display object if present
-      const displayFields = obj.display?.data as Record<string, string> | undefined | null;
-
-      const displayName =
-        meta?.displayName ??
-        displayFields?.["name"] ??
-        null;
-
-      const displayUrl =
-        meta?.displayUrl ??
-        displayFields?.["link"] ??
-        displayFields?.["url"] ??
-        null;
-
-      results.push({
-        objectId:      obj.objectId,
-        objectType:    obj.type,
-        senderAddress: sender,
-        displayName,
-        displayUrl,
-        moveAbi:       meta?.moveAbi ?? null,
+    // Fetch all objects owned by the spam wallet across every page.
+    let cursor: string | null | undefined = null;
+    do {
+      const owned = await client.getOwnedObjects({
+        owner: SPAM_WALLET,
+        cursor: cursor ?? undefined,
+        limit: 50,
+        options: {
+          showType:    true,
+          showDisplay: true,
+          showContent: true,
+        },
       });
-    }
+
+      for (const item of owned.data) {
+        const obj = item.data;
+        if (!obj || !obj.objectId || !obj.type) continue;
+
+        // Skip system/gas objects (0x2::coin::Coin<0x2::sui::SUI> from framework)
+        // unless they came from the spammer address (dust attack)
+        const isCoinSUI = obj.type.includes("0x2::coin::Coin");
+        const isDisplayOrPub =
+          obj.type.includes("::display::Display") ||
+          obj.type.includes("::package::Publisher") ||
+          obj.type.includes("::package::UpgradeCap");
+
+        if (isDisplayOrPub) continue;  // skip publishing artifacts
+
+        // Determine sender: for dust it's the spammer, for minted objects it's our wallet
+        const sender = isCoinSUI ? SPAMMER_ADDRESS : SPAM_WALLET;
+
+        // Look up enriched metadata by type
+        const baseType = obj.type.replace(/<.*>/, ""); // strip generic params
+        const meta = KNOWN_OBJECT_META[baseType];
+
+        // Pull display fields from on-chain display object if present
+        const displayFields = obj.display?.data as Record<string, string> | undefined | null;
+
+        const displayName =
+          meta?.displayName ??
+          displayFields?.["name"] ??
+          null;
+
+        const displayUrl =
+          meta?.displayUrl ??
+          displayFields?.["link"] ??
+          displayFields?.["url"] ??
+          null;
+
+        results.push({
+          objectId:      obj.objectId,
+          objectType:    obj.type,
+          senderAddress: sender,
+          displayName,
+          displayUrl,
+          moveAbi:       meta?.moveAbi ?? null,
+        });
+      }
+
+      cursor = owned.nextCursor;
+      if (!owned.hasNextPage) break;
+    } while (cursor);
   } catch (err) {
     // If the RPC call fails, log and fall through — we return whatever we got
     console.warn("fetchRealSpamObjects: RPC error", err);
