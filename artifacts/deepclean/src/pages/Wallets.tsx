@@ -390,63 +390,74 @@ export default function Wallets() {
 
     appendSeedLog(walletId, mkLog("info", "  Verifying object ownership before building PTB…"));
 
-    // Browser-friendly RPC check: call the Sui JSON-RPC `sui_getObject` method
+    // Browser-friendly RPC check: call the Sui JSON-RPC `sui_getObject` method and obtain version/digest
     const rpcUrl = (import.meta as any)?.env?.VITE_SUI_RPC_URL || "https://fullnode.testnet.sui.io:443";
-    async function fetchObject(id: string) {
+
+    interface ResolvedObject {
+      objectId: string;
+      version: string;
+      digest: string;
+    }
+
+    async function fetchResolvedObject(id: string): Promise<ResolvedObject | null> {
       try {
         const resp = await fetch(rpcUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "sui_getObject", params: [id] }),
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "sui_getObject",
+            params: [id, { showOwner: true, showType: true }],
+          }),
         });
         const payload = await resp.json();
-        if (!payload || payload.error) return null;
-        return payload.result;
+        if (!payload || payload.error || !payload.result) return null;
+        const result = payload.result as any;
+
+        // Normalize result formats across node versions
+        const data = result.data ?? result;
+        if (!data) return null;
+
+        const objectId = (data.objectId ?? data.object_id ?? id) as string | undefined;
+        const version = String(data.version ?? data.objectVersion ?? data.reference?.version ?? "");
+        const digest = (data.digest ?? data.objectDigest ?? data.reference?.digest ?? "") as string;
+
+        if (!objectId || !version || !digest) return null;
+
+        const ownerField = data.owner?.AddressOwner ?? data.owner?.address ?? data.owner ?? null;
+        if (ownerField && String(ownerField).toLowerCase() !== walletAddress.toLowerCase()) return null;
+
+        return { objectId, version, digest };
       } catch {
         return null;
       }
     }
 
-    const resolvableObjects: string[] = [];
+    const resolvedObjects: ResolvedObject[] = [];
     for (const threat of validThreats) {
       try {
-        const obj = await fetchObject(threat.objectId);
-        if (!obj) {
-          appendSeedLog(walletId, mkLog("warn", `  Skipping missing object: ${threat.objectId}`));
+        const resolved = await fetchResolvedObject(threat.objectId);
+        if (!resolved) {
+          appendSeedLog(walletId, mkLog("warn", `  Skipping unresolvable object: ${threat.objectId}`));
           continue;
         }
-
-        // `sui_getObject` result shapes vary; check common fields for existence
-        const status = (obj as any).status || (obj as any).exists || null;
-        if (status && String(status).toLowerCase() !== "exists") {
-          appendSeedLog(walletId, mkLog("warn", `  Skipping non-existent object: ${threat.objectId}`));
-          continue;
-        }
-
-        // Try to read the owner from a few possible locations; if present, verify match
-        const details = (obj as any).details || (obj as any).data || {};
-        const owner = details?.owner?.Address || details?.owner?.address || details?.owner || details?.ownerAddress;
-        if (owner && String(owner).toLowerCase() !== walletAddress.toLowerCase()) {
-          appendSeedLog(walletId, mkLog("warn", `  Skipping object not owned by wallet: ${threat.objectId}`));
-          continue;
-        }
-
-        resolvableObjects.push(threat.objectId);
+        resolvedObjects.push(resolved);
       } catch (err) {
-        appendSeedLog(walletId, mkLog("warn", `  Error fetching object ${threat.objectId} — skipping`));
+        appendSeedLog(walletId, mkLog("warn", `  Error resolving object ${threat.objectId} — skipping`));
         continue;
       }
     }
 
-    if (resolvableObjects.length === 0) {
+    if (resolvedObjects.length === 0) {
       appendSeedLog(walletId, mkLog("error", "  No valid objects remain to burn after verification"));
       return false;
     }
 
     const tx = new Transaction();
     tx.transferObjects(
-      resolvableObjects.map((id) => tx.object(id)),
-      deadAddress,
+      resolvedObjects.map(({ objectId, version, digest }) => tx.objectRef({ objectId, version, digest })),
+      tx.pure.address(deadAddress),
     );
 
     appendSeedLog(walletId, mkLog("info", "  Wallet popup opening — please approve the transaction…"));
@@ -468,8 +479,14 @@ export default function Wallets() {
     appendSeedLog(walletId, mkLog("success", "✓ On-chain tx confirmed"));
     appendSeedLog(walletId, mkLog("success", "  digest", digest));
 
+    // Only mark threats as burned if their objects were actually transferred on-chain
+    const resolvedIds = new Set(resolvedObjects.map((o) => o.objectId));
+    const burnedThreatIds = validThreats
+      .filter((t) => resolvedIds.has(t.objectId))
+      .map((t) => t.id);
+    
     const cleanResult = await cleanWalletApi(
-      threats.map((threat) => threat.id),
+      burnedThreatIds,
       digest,
     );
 
