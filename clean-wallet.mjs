@@ -166,10 +166,30 @@ async function main() {
   // ── 3. Build PTB ───────────────────────────────────────────────────────────
 
   console.log("\n  Building PTB — transfer all spam objects to dead address...");
+  
+  // Validate that all threats have objectIds
+  const validThreats = threats.filter((t) => {
+    if (!t.objectId) {
+      console.warn(`    ⚠ Skipping threat without objectId: ${JSON.stringify(t)}`);
+      return false;
+    }
+    return true;
+  });
+
+  if (validThreats.length === 0) {
+    console.error("    ✗ No valid objects to burn");
+    process.exit(1);
+  }
+
+  if (validThreats.length !== threats.length) {
+    console.log(`    ⚠ Warning: ${threats.length - validThreats.length} threat(s) skipped due to missing objectId`);
+  }
+
   const tx = new Transaction();
+  const deadAddress = "0x0"; // Use properly formatted dead address
   tx.transferObjects(
-    threats.map((t) => tx.object(t.objectId)),
-    "0x0000000000000000000000000000000000000000000000000000000000000000"
+    validThreats.map((t) => tx.object(t.objectId)),
+    deadAddress
   );
 
   // ── 4. Sign and execute on-chain ───────────────────────────────────────────
@@ -211,7 +231,7 @@ async function main() {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeader },
     body: JSON.stringify({
-      threatIds: threats.map((t) => t.id),
+      threatIds: validThreats.map((t) => t.id),
       burnTxDigest: digest,
     }),
   });

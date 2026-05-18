@@ -27,7 +27,6 @@ const queryClient = new QueryClient({
 // Contracts are deployed on testnet — wallet must connect to the same network
 const networks = {
   testnet: { url: getFullnodeUrl("testnet") },
-  devnet:  { url: getFullnodeUrl("devnet") },
 };
 
 function Router() {

@@ -16,7 +16,7 @@
 
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction } from "@mysten/sui/transactions";
-import { getFullnodeUrl, SuiJsonRpcClient } from "@mysten/sui/client";
+import { getJsonRpcFullnodeUrl, SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { fromBase64 } from "@mysten/sui/utils";
 
 // ── Parse args ────────────────────────────────────────────────────────────────
@@ -123,12 +123,13 @@ async function main() {
 
   console.log("  ┌─ STEP 2: Seed Threats ─────────────────────────────────┐");
   console.log("  │");
+  let populatedThreats = [];
   try {
     console.log("    📡 Detecting on-chain objects...");
-    const populateRes = await fetch(`${api}/api/populate`, {
+    const populateRes = await fetch(`${api}/api/populate-wallet`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeader },
-      body: JSON.stringify({ address }),
+      body: JSON.stringify({ targetAddress: address }),
     });
 
     if (!populateRes.ok) {
@@ -136,7 +137,8 @@ async function main() {
     }
 
     const populateData = await populateRes.json();
-    const threatsCount = populateData.threats?.length ?? 0;
+    populatedThreats = Array.isArray(populateData.threats) ? populateData.threats : [];
+    const threatsCount = populatedThreats.filter((threat) => threat?.threatId !== null).length;
     console.log(`    ✓ Detected ${threatsCount} threat(s)\n`);
   } catch (err) {
     console.error(`    ✗ ${err.message}\n`);
@@ -149,19 +151,9 @@ async function main() {
   console.log("  ┌─ STEP 3: Clean Wallet ─────────────────────────────────┐");
   console.log("  │");
 
-  // Fetch threats
-  let threats;
+  const threats = populatedThreats.filter((threat) => threat?.threatId !== null);
   try {
-    console.log("    📋 Fetching quarantined threats...");
-    const threatsRes = await fetch(
-      `${api}/api/threats?status=quarantined&walletAddress=${encodeURIComponent(address)}&limit=200`,
-      { headers: authHeader }
-    );
-    if (!threatsRes.ok) {
-      throw new Error(`HTTP ${threatsRes.status}`);
-    }
-    threats = await threatsRes.json();
-    if (!Array.isArray(threats)) threats = [];
+    console.log("    📋 Using quarantined threats returned by populate-wallet...");
     console.log(`    ✓ Found ${threats.length} threat(s)\n`);
   } catch (err) {
     console.error(`    ✗ Failed to fetch threats: ${err.message}\n`);
@@ -169,21 +161,39 @@ async function main() {
   }
 
   if (threats.length === 0) {
-    console.log("    ✓ No threats to clean — wallet is already clean!\n");
+    console.log("    ✗ No quarantined threats were returned, so nothing was cleaned.\n");
     console.log("  └────────────────────────────────────────────────────────┘\n");
   } else {
     // Build and execute burn transaction
     let digest;
     try {
       console.log("    🔥 Building burn transaction...");
+      
+      // Validate that all threats have objectIds
+      const validThreats = threats.filter((t) => {
+        if (!t.objectId) {
+          console.warn(`    ⚠ Skipping threat without objectId: ${JSON.stringify(t)}`);
+          return false;
+        }
+        return true;
+      });
+
+      if (validThreats.length === 0) {
+        throw new Error("No valid objects to burn");
+      }
+
+      if (validThreats.length !== threats.length) {
+        console.log(`    ⚠ Warning: ${threats.length - validThreats.length} threat(s) skipped due to missing objectId`);
+      }
+
       const tx = new Transaction();
-      tx.transferObjects(
-        threats.map((t) => tx.object(t.objectId)),
-        "0x0000000000000000000000000000000000000000000000000000000000000000"
-      );
+      const objectsToTransfer = validThreats.map((t) => tx.object(t.objectId));
+      const deadAddress = "0x0"; // Use properly formatted dead address
+      
+      tx.transferObjects(objectsToTransfer, deadAddress);
 
       console.log("    ⛓️  Signing and executing on-chain...");
-      const client = new SuiJsonRpcClient({ url: getFullnodeUrl(network) });
+      const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl(network), network });
       const result = await client.signAndExecuteTransaction({
         transaction: tx,
         signer: keypair,
@@ -195,7 +205,7 @@ async function main() {
       }
 
       digest = result.digest;
-      console.log(`    ✓ Burned ${threats.length} object(s)\n`);
+      console.log(`    ✓ Burned ${validThreats.length} object(s)\n`);
     } catch (err) {
       console.error(`    ✗ Transaction failed: ${err.message}\n`);
       process.exit(1);
@@ -234,7 +244,7 @@ async function main() {
 
   try {
     console.log("    🔍 Checking on-chain objects...");
-    const client = new SuiJsonRpcClient({ url: getFullnodeUrl(network) });
+    const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl(network), network });
     const ownedObjects = await client.getOwnedObjects({
       owner: address,
       options: { showType: true },
@@ -275,8 +285,13 @@ async function main() {
     } else {
       console.log(`    ✗ ${quarantined.length} threat(s) still quarantined\n`);
     }
+
+    if (spamObjects.length > 0 || quarantined.length > 0) {
+      throw new Error("Verification failed: residual spam or quarantined threats remain");
+    }
   } catch (err) {
     console.error(`    ⚠  Verification check failed: ${err.message}\n`);
+    process.exit(1);
   }
 
   console.log("  └────────────────────────────────────────────────────────┘\n");

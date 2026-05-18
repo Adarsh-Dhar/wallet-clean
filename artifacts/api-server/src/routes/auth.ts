@@ -20,6 +20,8 @@ router.get("/auth/challenge", async (req, res) => {
 router.post("/auth/login", async (req, res) => {
   const address = req.body?.address;
   const signature = req.body?.signature;
+  const signedBytes = req.body?.bytes;
+  const chain = req.body?.chain;
 
   if (typeof address !== "string" || typeof signature !== "string") {
     res.status(400).json({ error: "address and signature are required" });
@@ -27,7 +29,12 @@ router.post("/auth/login", async (req, res) => {
   }
 
   try {
-    const session = await loginWithSignature(address, signature);
+    const session = await loginWithSignature(
+      address,
+      signature,
+      typeof signedBytes === "string" ? signedBytes : undefined,
+      typeof chain === "string" ? chain : undefined,
+    );
     res.setHeader("Cache-Control", "no-store");
     res.json(session);
   } catch (error) {

@@ -96,11 +96,11 @@ export async function requestAuthChallenge(address: string): Promise<AuthChallen
   });
 }
 
-export async function loginWithWallet(address: string, signature: string): Promise<AuthLoginResponse> {
+export async function loginWithWallet(address: string, signature: string, bytes: string, chain?: string): Promise<AuthLoginResponse> {
   const session = await apiJson<AuthLoginResponse>("/api/auth/login", {
     method: "POST",
     auth: false,
-    body: { address: normalizeSuiAddress(address), signature },
+    body: { address: normalizeSuiAddress(address), signature, bytes, chain },
   });
 
   setStoredAuthToken(session.token);

@@ -156,10 +156,9 @@ async function pollWallet(address: string): Promise<void> {
 
         const objectData  = await fetchObjectType(objectId);
         const objectType  = objectData?.type ?? "unknown::module::Unknown";
-        const senderAddress = tx.transaction?.data?.transaction?.kind ?? address;
 
         logger.info({ objectId, objectType, address: normalizedAddress }, "New object detected for monitored wallet");
-        await analyzeAndStore(objectId, objectType, senderAddress, address);
+        await analyzeAndStore(objectId, objectType, address, address);
       }
     }
   } catch (err) {
@@ -203,7 +202,7 @@ async function analyzeAndStore(
         storeThreatLog(logPayload),
         prisma.threat.create({
           data: {
-            objectId, objectType, senderAddress,
+            objectId, objectType, senderAddress, walletAddress,
             riskScore:  verdict.risk_score,
             verdict:    verdict.verdict,
             reasonCode: verdict.reason_code,

@@ -22,30 +22,43 @@ router.get("/monitor/wallets", async (_req, res) => {
 
 // POST /monitor/wallets
 router.post("/monitor/wallets", async (req, res) => {
-  const body = AddWatchedWalletBody.safeParse(req.body);
-  if (!body.success) {
-    res.status(400).json({ error: "Invalid request body" });
-    return;
+  try {
+    const body = AddWatchedWalletBody.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "Invalid request body", details: body.error });
+      return;
+    }
+
+    const normalizedAddress = normalizeSuiAddress(body.data.address);
+    if (!isValidSuiAddress(normalizedAddress)) {
+      res.status(400).json({ error: "Invalid Sui address" });
+      return;
+    }
+
+    const wallet = await prisma.watchedWallet.upsert({
+      where: { address: normalizedAddress },
+      update: {
+        label:    body.data.label,
+        isActive: true,
+      },
+      create: {
+        address:  normalizedAddress,
+        label:    body.data.label,
+        isActive: true,
+      },
+    });
+
+    res.status(201).json({
+      ...wallet,
+      createdAt: wallet.createdAt.toISOString(),
+    });
+  } catch (err) {
+    req.log.error({ err }, "Failed to create wallet");
+    res.status(500).json({ 
+      error: err instanceof Error ? err.message : "Internal server error",
+      type: err?.constructor?.name,
+    });
   }
-
-  const normalizedAddress = normalizeSuiAddress(body.data.address);
-  if (!isValidSuiAddress(normalizedAddress)) {
-    res.status(400).json({ error: "Invalid Sui address" });
-    return;
-  }
-
-  const wallet = await prisma.watchedWallet.create({
-    data: {
-      address:  normalizedAddress,
-      label:    body.data.label,
-      isActive: true,
-    },
-  });
-
-  res.status(201).json({
-    ...wallet,
-    createdAt: wallet.createdAt.toISOString(),
-  });
 });
 
 // DELETE /monitor/wallets/:id

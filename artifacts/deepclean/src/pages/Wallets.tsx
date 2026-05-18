@@ -21,7 +21,7 @@ import { walletSchema, type WalletFormValues } from "@/lib/schemas";
 import { apiJson } from "@/lib/auth";
 import {
   Trash2, Plus, Wallet, AlertTriangle, Zap,
-  CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, X, Lock,
+  CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, X, Lock, Shield, ExternalLink,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -368,10 +368,29 @@ export default function Wallets() {
     appendSeedLog(walletId, mkLog("info", `  Found ${threats.length} quarantined objects`));
     appendSeedLog(walletId, mkLog("info", "  Building PTB — transferring spam objects to dead address…"));
 
+    // Validate that all threats have objectIds
+    const validThreats = threats.filter((threat) => {
+      if (!threat.objectId) {
+        appendSeedLog(walletId, mkLog("warn", `  Skipping threat without objectId: ${JSON.stringify(threat)}`));
+        return false;
+      }
+      return true;
+    });
+
+    if (validThreats.length === 0) {
+      appendSeedLog(walletId, mkLog("error", "  No valid objects to burn"));
+      return false;
+    }
+
+    if (validThreats.length !== threats.length) {
+      appendSeedLog(walletId, mkLog("warn", `  Warning: ${threats.length - validThreats.length} threat(s) skipped due to missing objectId`));
+    }
+
     const tx = new Transaction();
+    const deadAddress = "0x0"; // Use properly formatted dead address
     tx.transferObjects(
-      threats.map((threat) => tx.object(threat.objectId)),
-      "0x0000000000000000000000000000000000000000000000000000000000000000",
+      validThreats.map((threat) => tx.object(threat.objectId)),
+      deadAddress,
     );
 
     appendSeedLog(walletId, mkLog("info", "  Wallet popup opening — please approve the transaction…"));
@@ -442,7 +461,7 @@ export default function Wallets() {
     }
   }
 
-  // ── Seed spam mutation (with detailed logs) ───────────────────────────────
+  // ── Populate wallet mutation (with detailed logs) ─────────────────────────
   const populate = useMutation({
     mutationFn: ({ address }: { address: string }) => populateWalletApi(address),
 
@@ -456,23 +475,9 @@ export default function Wallets() {
       appendSeedLog(walletId, mkLog("info", "Starting wallet population…"));
       appendSeedLog(walletId, mkLog("info", `Target: ${address}`));
       appendSeedLog(walletId, mkLog("info", "POST /api/populate-wallet →"));
-      appendSeedLog(walletId, mkLog("info", "Injecting 10 synthetic spam + 5 legit objects:"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] scam_airdrop::FreeToken — fake SUI airdrop URL"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] phishing_kit::WalletDrainer — Cyrillic homoglyph URL"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] honeypot_defi::HoneypotToken — hidden _drain_all ABI"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] fake_foundation::FounderPass — digit-substitution domain"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] nft_phish::MintPass — phishing mint URL"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] fake_cetus::LPReceipt — fake Cetus rewards"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] approval_phish::ApprovalRequest — homoglyph sweep ABI"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] dust_attack::TrackingDust — dust tracking"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] rug_token::MemeCoin — freeze_all + migrate_funds ABI"));
-      appendSeedLog(walletId, mkLog("warn", "  [spam] fake_governance::VoteProposal — fake DAO vote"));
-      appendSeedLog(walletId, mkLog("success", "  [legit] coin::Coin — native SUI coin"));
-      appendSeedLog(walletId, mkLog("success", "  [legit] coin::USDC — Circle USD Coin"));
-      appendSeedLog(walletId, mkLog("success", "  [legit] pool::Position — Cetus LP Position"));
-      appendSeedLog(walletId, mkLog("success", "  [legit] clob_v2::Order — DeepBook Order"));
-      appendSeedLog(walletId, mkLog("success", "  [legit] kiosk::Kiosk — Sui Kiosk"));
-      appendSeedLog(walletId, mkLog("info", "Sending all 15 to GitHub Models for analysis…"));
+      appendSeedLog(walletId, mkLog("info", "Scanning live wallet objects for threat analysis…"));
+      appendSeedLog(walletId, mkLog("info", "Fetching owned objects from the connected wallet"));
+      appendSeedLog(walletId, mkLog("info", "Sending wallet objects to GitHub Models for analysis…"));
     },
 
     onSuccess: async (result, { address }) => {
@@ -515,13 +520,14 @@ export default function Wallets() {
       }
 
       if (quarantined.length > 0) {
-        appendSeedLog(walletId, mkLog("info", "  Spam batch complete. Click 'Seed spam' again to add 5 more."));
+        appendSeedLog(walletId, mkLog("info", "  Scan complete. Click 'Populate' again to rescan current wallet objects."));
         appendSeedLog(walletId, mkLog("info", "  Click 'Clean' when ready to burn all quarantined threats."));
       }
 
       appendSeedLog(walletId, mkLog("success", "✓ Dashboard & threat list refreshed"));
       appendSeedLog(walletId, mkLog("success", "Population complete."));
 
+      queryClient.invalidateQueries({ queryKey: getListWatchedWalletsQueryKey() });
       queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
       queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
       toast({
@@ -690,7 +696,7 @@ export default function Wallets() {
                   className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-cyan-400 hover:bg-cyan-500/10 shrink-0"
                   onClick={() => populate.mutate({ address: wallet.address })}
                   disabled={populatingId === wallet.id || cleaningId === wallet.id}
-                  title="Seed wallet with 10 spam + 5 legit synthetic objects for demo"
+                  title="Scan wallet objects for threats"
                   data-testid={`button-seed-wallet-${wallet.id}`}
                 >
                   {populatingId === wallet.id ? (
@@ -701,7 +707,7 @@ export default function Wallets() {
                   ) : (
                     <>
                       <Zap className="w-3 h-3" />
-                      <span className="hidden sm:inline">Seed spam</span>
+                      <span className="hidden sm:inline">Populate</span>
                     </>
                   )}
                 </Button>
@@ -756,11 +762,11 @@ export default function Wallets() {
                 </Button>
               </div>
 
-              {/* Seed spam log panel */}
+              {/* Populate log panel */}
               {openSeedLog === wallet.id && seedLogs[wallet.id] && (
                 <LogPanel
                   logs={seedLogs[wallet.id]}
-                  title={`Seed spam — ${wallet.label}`}
+                  title={`Populate — ${wallet.label}`}
                   onClose={() => setOpenSeedLog(null)}
                 />
               )}

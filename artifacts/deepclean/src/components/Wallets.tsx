@@ -277,14 +277,14 @@ export default function Wallets() {
                 </div>
               </div>
 
-              {/* Seed spam button */}
+              {/* Populate wallet button */}
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-cyan-400 hover:bg-cyan-500/10 shrink-0"
                 onClick={() => populate.mutate({ address: wallet.address })}
                 disabled={populate.isPending}
-                title="Seed wallet with 5 synthetic spam objects for demo"
+                title="Scan wallet objects for threats"
                 data-testid={`button-seed-wallet-${wallet.id}`}
               >
                 {populatingId === wallet.id ? (
@@ -295,7 +295,7 @@ export default function Wallets() {
                 ) : (
                   <>
                     <Zap className="w-3 h-3" />
-                    <span className="hidden sm:inline">Seed spam</span>
+                    <span className="hidden sm:inline">Populate</span>
                   </>
                 )}
               </Button>

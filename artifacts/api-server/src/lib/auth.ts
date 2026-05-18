@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
+import { verifyPersonalMessageSignature, verifySignature } from "@mysten/sui/verify";
 import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
+import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import type { NextFunction, Request, Response } from "express";
 
 const encoder = new TextEncoder();
@@ -10,8 +11,36 @@ const AUTH_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const AUTH_ISSUER = "deepclean-api";
 const AUTH_AUDIENCE = "deepclean";
 const AUTH_SECRET = process.env["AUTH_JWT_SECRET"] ?? "deepclean-dev-secret";
+const SUI_NETWORK = (process.env["SUI_NETWORK"] ?? "testnet") as "testnet" | "mainnet" | "devnet" | "localnet";
 
 const challengeStore = new Map<string, AuthChallengeRecord>();
+const verifyClientCache = new Map<string, SuiJsonRpcClient>();
+
+function normalizeNetwork(chainInput?: string): "mainnet" | "testnet" | "devnet" | "localnet" {
+  if (!chainInput) return SUI_NETWORK;
+
+  const chain = chainInput.toLowerCase();
+  const network = chain.includes(":") ? chain.split(":").at(-1) : chain;
+
+  if (network === "mainnet" || network === "testnet" || network === "devnet" || network === "localnet") {
+    return network;
+  }
+
+  return SUI_NETWORK;
+}
+
+function getVerifyClient(network: "mainnet" | "testnet" | "devnet" | "localnet"): SuiJsonRpcClient {
+  const cached = verifyClientCache.get(network);
+  if (cached) return cached;
+
+  const client = new SuiJsonRpcClient({
+    url: getJsonRpcFullnodeUrl(network),
+    network,
+  });
+
+  verifyClientCache.set(network, client);
+  return client;
+}
 
 export interface AuthChallenge {
   address: string;
@@ -142,7 +171,12 @@ export function issueChallenge(addressInput: string): AuthChallenge {
   };
 }
 
-export async function loginWithSignature(addressInput: string, signature: string): Promise<AuthLoginResponse> {
+export async function loginWithSignature(
+  addressInput: string,
+  signature: string,
+  signedBytesBase64?: string,
+  chainInput?: string
+): Promise<AuthLoginResponse> {
   const address = normalizeSuiAddress(addressInput);
   if (!isValidSuiAddress(address)) {
     throw new Error("Invalid Sui address");
@@ -160,7 +194,39 @@ export async function loginWithSignature(addressInput: string, signature: string
     throw new Error("Login challenge expired");
   }
 
-  await verifyPersonalMessageSignature(encoder.encode(record.challenge), signature, { address });
+  const issuedChallengeBytes = encoder.encode(record.challenge);
+  let bytesToVerify: Uint8Array = issuedChallengeBytes;
+
+  if (typeof signedBytesBase64 === "string" && signedBytesBase64.trim() !== "") {
+    let decodedBytes: Buffer;
+    try {
+      decodedBytes = Buffer.from(signedBytesBase64, "base64");
+    } catch {
+      throw new Error("Invalid signed message bytes");
+    }
+
+    if (
+      decodedBytes.length !== issuedChallengeBytes.length ||
+      !timingSafeEqual(decodedBytes, Buffer.from(issuedChallengeBytes))
+    ) {
+      throw new Error("Signed challenge does not match issued challenge");
+    }
+
+    bytesToVerify = decodedBytes;
+  }
+
+  try {
+    await verifyPersonalMessageSignature(bytesToVerify, signature, {
+      client: getVerifyClient(normalizeNetwork(chainInput)),
+      address,
+    });
+  } catch (personalMessageError) {
+    // Some wallets still route through deprecated signMessage semantics.
+    // Accept that path only for the exact issued challenge bytes.
+    await verifySignature(bytesToVerify, signature, { address }).catch(() => {
+      throw personalMessageError;
+    });
+  }
 
   challengeStore.delete(address);
 

@@ -77,8 +77,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const challenge = await requestAuthChallenge(account.address);
       const messageBytes = new TextEncoder().encode(challenge.challenge);
-      const result = await signPersonalMessage({ message: messageBytes });
-      const session = await loginWithWallet(account.address, result.signature);
+      const result = await signPersonalMessage({ message: messageBytes, account });
+      const session = await loginWithWallet(account.address, result.signature, result.bytes, account.chains[0]);
       setStoredAuthToken(session.token);
       setWalletAddress(session.address);
       setStatus("authenticated");
