@@ -395,8 +395,6 @@ export default function Wallets() {
 
     interface ResolvedObject {
       objectId: string;
-      version: string;
-      digest: string;
     }
 
     async function fetchResolvedObject(id: string): Promise<ResolvedObject | null> {
@@ -420,21 +418,19 @@ export default function Wallets() {
         if (!data) return null;
 
         const objectId = (data.objectId ?? data.object_id ?? id) as string | undefined;
-        const version = String(data.version ?? data.objectVersion ?? data.reference?.version ?? "");
-        const digest = (data.digest ?? data.objectDigest ?? data.reference?.digest ?? "") as string;
-
-        if (!objectId || !version || !digest) return null;
+        if (!objectId) return null;
 
         const ownerField = data.owner?.AddressOwner ?? data.owner?.address ?? data.owner ?? null;
         if (ownerField && String(ownerField).toLowerCase() !== walletAddress.toLowerCase()) return null;
 
-        return { objectId, version, digest };
+        return { objectId };
       } catch {
         return null;
       }
     }
 
     const resolvedObjects: ResolvedObject[] = [];
+    const seenObjectIds = new Set<string>();
     for (const threat of validThreats) {
       try {
         const resolved = await fetchResolvedObject(threat.objectId);
@@ -442,6 +438,11 @@ export default function Wallets() {
           appendSeedLog(walletId, mkLog("warn", `  Skipping unresolvable object: ${threat.objectId}`));
           continue;
         }
+        if (seenObjectIds.has(resolved.objectId)) {
+          appendSeedLog(walletId, mkLog("warn", `  Skipping duplicate object: ${resolved.objectId}`));
+          continue;
+        }
+        seenObjectIds.add(resolved.objectId);
         resolvedObjects.push(resolved);
       } catch (err) {
         appendSeedLog(walletId, mkLog("warn", `  Error resolving object ${threat.objectId} — skipping`));
@@ -456,7 +457,7 @@ export default function Wallets() {
 
     const tx = new Transaction();
     tx.transferObjects(
-      resolvedObjects.map(({ objectId, version, digest }) => tx.objectRef({ objectId, version, digest })),
+      resolvedObjects.map(({ objectId }) => tx.object(objectId)),
       tx.pure.address(deadAddress),
     );
 
@@ -464,11 +465,9 @@ export default function Wallets() {
 
     let digest: string;
     try {
-      const result = await signAndExecute({
-        // dapp-kit resolves a different @mysten/sui version in this monorepo,
-        // so we bridge the transaction type at compile time.
-        transaction: tx as unknown as Parameters<typeof signAndExecute>[0]["transaction"],
-      });
+      // Pass the Transaction object directly to the wallet sign/execute helper.
+      // `tx.build()` returns a Uint8Array which the dapp-kit helper does not accept.
+      const result = await signAndExecute({ transaction: tx });
       digest = result.digest;
     } catch (err) {
       appendSeedLog(walletId, mkLog("error", "✗ User rejected or transaction failed"));
