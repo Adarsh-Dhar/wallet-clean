@@ -22,10 +22,10 @@ module deepclean_spam::malicious_airdrop {
         transfer::public_transfer(pub,  ctx.sender());
     }
 
-    public fun mint(ctx: &mut TxContext) {
+    public entry fun mint(recipient: address, ctx: &mut TxContext) {
         transfer::public_transfer(
             AirdropToken { id: object::new(ctx) },
-            ctx.sender()
+            recipient
         );
     }
 }

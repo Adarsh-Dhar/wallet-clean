@@ -166,8 +166,22 @@ export default function Threats() {
                       <ExternalLink className="w-3 h-3" />
                     </a>
                   </td>
-                  <td className="px-4 py-3 text-xs text-muted-foreground font-mono truncate max-w-35">
-                    {t.objectType.split("::").pop()}
+                  <td className="px-4 py-3 text-xs text-muted-foreground truncate max-w-35">
+                    {(() => {
+                      const typeParts = String(t.objectType).split("::");
+                      const moduleName = typeParts.length >= 2 ? typeParts[typeParts.length - 2] : null;
+                      const structName = typeParts[typeParts.length - 1] ?? String(t.objectType);
+                      const derivedType = moduleName ? `${moduleName}::${structName}` : structName;
+
+                      return (
+                        <div className="min-w-0">
+                          <div className="font-mono text-foreground truncate">{derivedType}</div>
+                          {t.displayName && t.displayName !== derivedType && (
+                            <div className="text-[11px] text-muted-foreground truncate">{t.displayName}</div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="px-4 py-3"><VerdictBadge verdict={t.verdict} /></td>
                   <td className="px-4 py-3 w-40"><RiskBar score={t.riskScore} /></td>

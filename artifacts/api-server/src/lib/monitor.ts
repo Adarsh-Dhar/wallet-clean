@@ -182,11 +182,27 @@ async function analyzeAndStore(
   walletAddress: string,
 ): Promise<void> {
   try {
-    const verdict = await analyzeThreat({ objectId, objectType, senderAddress });
+    // If this objectType matches one of the demo junk modules, provide a
+    // human-friendly displayName so seeded objects show correct labels in the UI.
+    const moduleSegment = objectType.split("::")?.[1]?.toLowerCase() ?? "";
+    logger.info({ objectId, fullObjectType: objectType, extractedModule: moduleSegment }, "Object detected for analysis");
+
+    const DEMO_LABELS: Record<string, string> = {
+      malicious_airdrop: "Fake SUI Airdrop Token",
+      rug_token: "Rug Meme Coin",
+      fake_foundation_nft: "Fake Foundation NFT",
+      pool: "Spoofed Cetus LP Position",
+      honeypot_defi: "Honeypot DeFi Token",
+    };
+
+    const inferredDisplayName = DEMO_LABELS[moduleSegment] ?? null;
+    logger.info({ moduleSegment, inferredDisplayName, allLabelsForDebug: Object.keys(DEMO_LABELS) }, "Display name lookup result");
+
+    const verdict = await analyzeThreat({ objectId, objectType, senderAddress, displayName: inferredDisplayName });
 
     const logPayload = buildThreatLog({
       objectId, objectType, senderAddress,
-      displayName: null, displayUrl: null,
+      displayName: inferredDisplayName, displayUrl: null,
       verdict:    verdict.verdict,
       riskScore:  verdict.risk_score,
       reasonCode: verdict.reason_code,
@@ -202,7 +218,12 @@ async function analyzeAndStore(
         storeThreatLog(logPayload),
         prisma.threat.create({
           data: {
-            objectId, objectType, senderAddress, walletAddress,
+            objectId,
+            objectType,
+            senderAddress,
+            walletAddress,
+            displayName: inferredDisplayName ?? null,
+            displayUrl: null,
             riskScore:  verdict.risk_score,
             verdict:    verdict.verdict,
             reasonCode: verdict.reason_code,

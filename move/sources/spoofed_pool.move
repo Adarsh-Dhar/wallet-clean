@@ -20,8 +20,8 @@ module deepclean_spam::pool {
         transfer::public_transfer(pub,  ctx.sender());
     }
 
-    public fun fake_mint(ctx: &mut TxContext) {
-        transfer::public_transfer(Position { id: object::new(ctx) }, ctx.sender());
+    public entry fun fake_mint(recipient: address, ctx: &mut TxContext) {
+        transfer::public_transfer(Position { id: object::new(ctx) }, recipient);
     }
 
     public fun collect_fees(_pos: &Position, _ctx: &mut TxContext) {

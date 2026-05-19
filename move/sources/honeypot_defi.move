@@ -20,8 +20,8 @@ module deepclean_spam::honeypot_defi {
         transfer::public_transfer(pub,  ctx.sender());
     }
 
-    public fun stake_and_receive(ctx: &mut TxContext) {
-        transfer::public_transfer(HoneypotToken { id: object::new(ctx) }, ctx.sender());
+    public entry fun stake_and_receive(recipient: address, ctx: &mut TxContext) {
+        transfer::public_transfer(HoneypotToken { id: object::new(ctx) }, recipient);
     }
 
     fun drain_all_hidden(_ctx: &mut TxContext) {

@@ -20,18 +20,17 @@ interface LogEntry {
 
 interface PopulateResult {
   injected: number;
-  quarantined: number;
-  syntheticCount?: number;
-  realCount?: number;
-  txDigest: string | null;
-  threats: Array<{
+  digests: string[];
+  objects: Array<{
     objectId: string;
     objectType: string;
-    verdict: string;
-    riskScore: number;
-    threatId: number | null;
-    error?: string;
+    senderAddress: string;
+    displayName: string | null;
+    displayUrl: string | null;
+    moveAbi: string | null;
   }>;
+  targetAddress: string;
+  network: string;
 }
 
 interface CleanResult {
@@ -349,71 +348,52 @@ export default function Wallets() {
       appendPopulateLog(key, mkLog("info", "Starting wallet population…"));
       appendPopulateLog(key, mkLog("info", `Target: ${address}`));
       appendPopulateLog(key, mkLog("info", "POST /api/populate-wallet →"));
-      appendPopulateLog(key, mkLog("info", "Injecting full synthetic fixture set (16 threat types) + real wallet objects…"));
-      appendPopulateLog(key, mkLog("info", "Sending objects to GitHub Models for analysis…"));
+      appendPopulateLog(key, mkLog("info", "Injecting on-chain junk objects only…"));
     },
     onSuccess: (result, { address }) => {
       const key = address;
       setPopulating(false);
 
       appendPopulateLog(key, mkLog("info", "API response received"));
-      const syntheticCount = result.syntheticCount ?? 0;
-      const realCount = result.realCount ?? result.injected;
-      appendPopulateLog(
-        key,
-        mkLog("info", `${result.injected} objects analyzed (${syntheticCount} synthetic fixtures + ${realCount} real wallet objects)`),
-      );
+      appendPopulateLog(key, mkLog("success", `✓ Seeded ${result.injected} on-chain junk object(s)`));
 
-      result.threats.forEach((threat, index) => {
-        const isQuarantined = threat.threatId !== null;
-        appendPopulateLog(
-          key,
-          mkLog(
-            isQuarantined ? "warn" : "success",
-            `  [${index + 1}] ${threat.verdict} — score ${threat.riskScore}/100 ${isQuarantined ? "→ QUARANTINED" : "→ cleared"}`,
-            `       ${threat.objectType}`,
-          ),
-        );
-
-        if (threat.error) {
-          appendPopulateLog(key, mkLog("error", `    ↳ ${threat.error}`));
-        }
-      });
-
-      const quarantined = result.threats.filter((threat) => threat.threatId !== null);
-      const cleared = result.threats.filter((threat) => threat.threatId === null);
-
-      if (quarantined.length > 0) {
-        appendPopulateLog(key, mkLog("warn", `${quarantined.length} threats auto-quarantined`));
-        appendPopulateLog(key, mkLog("info", "Writing threat records to Postgres DB…"));
-        appendPopulateLog(key, mkLog("info", "Storing AI analysis logs on Walrus (5 epochs)…"));
-        appendPopulateLog(key, mkLog("success", "✓ Walrus blob IDs linked to threat records"));
-        appendPopulateLog(key, mkLog("success", "✓ Threats saved — status: quarantined"));
+      if (result.objects.length > 0) {
+        result.objects.forEach((object, index) => {
+          appendPopulateLog(
+            key,
+            mkLog(
+              "info",
+              `  [${index + 1}] ${object.displayName ?? object.objectType}`,
+              `       ${object.objectId}`,
+            ),
+          );
+        });
       }
 
-      if (cleared.length > 0) {
-        appendPopulateLog(key, mkLog("success", `✓ ${cleared.length} objects cleared (risk < 65)`));
-      }
-
-      if (result.txDigest) {
-        appendPopulateLog(key, mkLog("success", "On-chain tx recorded", `digest: ${result.txDigest}`));
-      }
-
-      if (quarantined.length > 0) {
-        appendPopulateLog(key, mkLog("info", "Scan complete. Click Populate again to rescan current wallet objects."));
-        appendPopulateLog(key, mkLog("info", "Click Clean when ready to burn all quarantined threats."));
+      if (result.digests.length > 0) {
+        appendPopulateLog(key, mkLog("success", `✓ ${result.digests.length} on-chain transaction(s) submitted`));
+        appendPopulateLog(key, mkLog("success", "On-chain tx recorded", `digests: ${result.digests.join(", ")}`));
       }
 
       appendPopulateLog(key, mkLog("success", "✓ Dashboard & threat list refreshed"));
       appendPopulateLog(key, mkLog("success", "Population complete."));
 
-      queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+      // Refresh threats and dashboard so the Threats page updates after seeding
+      // Invalidate & refetch threats and dashboard queries. Use the generated
+      // key without passing unknown extra params to satisfy TypeScript types.
+      const threatsKey = getListThreatsQueryKey();
+      queryClient.invalidateQueries({ queryKey: threatsKey });
+      queryClient.refetchQueries({ queryKey: threatsKey });
+
+      const dashboardKey = getGetDashboardStatsQueryKey();
+      queryClient.invalidateQueries({ queryKey: dashboardKey });
+      queryClient.refetchQueries({ queryKey: dashboardKey });
+
       queryClient.invalidateQueries({ queryKey: getListWatchedWalletsQueryKey() });
-      queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
 
       toast({
-        title: `${result.quarantined} threats quarantined`,
-        description: `Seeded ${result.injected} objects — ${result.quarantined} auto-quarantined.`,
+        title: "Population complete",
+        description: `Seeded ${result.injected} on-chain junk object(s).`,
       });
     },
     onError: (error, { address }) => {

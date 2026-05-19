@@ -21,10 +21,10 @@ module deepclean_spam::fake_foundation_nft {
         transfer::public_transfer(pub,  ctx.sender());
     }
 
-    public fun mint(ctx: &mut TxContext) {
+    public entry fun mint(recipient: address, ctx: &mut TxContext) {
         transfer::public_transfer(
             FounderPass { id: object::new(ctx) },
-            ctx.sender()
+            recipient
         );
     }
 }

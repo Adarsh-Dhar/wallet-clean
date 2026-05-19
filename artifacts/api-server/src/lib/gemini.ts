@@ -1,7 +1,7 @@
 import { logger } from "./logger";
 
 const GITHUB_MODELS_TOKEN = process.env["GITHUB_MODELS_TOKEN"] ?? process.env["GITHUB_MODEL_TOKEN"];
-const GITHUB_MODELS_MODEL = "openai/gpt-4o";
+const GITHUB_MODELS_MODEL = "openai/gpt-4o-mini";
 const GITHUB_MODELS_API_URL = "https://models.github.ai/inference/chat/completions";
 
 export interface ThreatAnalysisInput {
@@ -69,6 +69,16 @@ const KNOWN_ATTACK_MODULES = [
   "fake_bridge", "approval_phish", "fake_governance", "sweep_all",
 ];
 
+// Demo junk modules minted by /api/populate-wallet. These should always be
+// quarantined so the threat UI stays deterministic.
+const DEMO_JUNK_MODULES = [
+  "malicious_airdrop",
+  "fake_foundation_nft",
+  "pool",
+  "honeypot_defi",
+  "rug_token",
+];
+
 // Move function names that indicate drain/honeypot behavior
 const DANGEROUS_ABI_PATTERNS = [
   "_drain", "drain_all", "_drain_all", "withdraw_all", "sweep",
@@ -101,7 +111,8 @@ export function extractStaticSignals(input: ThreatAnalysisInput): StaticSignals 
     (pkgAddress.replace(/^0x0*/, "").length <= 2);
 
   const isKnownMaliciousPattern =
-    KNOWN_ATTACK_MODULES.some((m) => moduleSegment.includes(m));
+    KNOWN_ATTACK_MODULES.some((m) => moduleSegment.includes(m)) ||
+    DEMO_JUNK_MODULES.some((m) => moduleSegment.includes(m));
 
   const hasHomoglyphUrl = url.length > 0 && /[^\x00-\x7F]/.test(url);
 
@@ -167,6 +178,25 @@ function scoreFromSignals(s: StaticSignals): { adjustment: number; flags: string
   if (s.domainAgeSuspicion) { adjustment += 10; flags.push("SUSPICIOUS_DOMAIN"); }
 
   return { adjustment, flags };
+}
+
+function isDemoJunkAsset(input: ThreatAnalysisInput): boolean {
+  const moduleSegment = input.objectType.split("::")?.[1]?.toLowerCase() ?? "";
+  return DEMO_JUNK_MODULES.some((m) => moduleSegment.includes(m));
+}
+
+function makeDemoJunkAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
+  const moduleSegment = input.objectType.split("::")?.[1]?.toLowerCase() ?? "unknown";
+
+  return {
+    risk_score: 95,
+    verdict: "MALICIOUS",
+    reason_code: 4,
+    confidence: 0.99,
+    flags: ["DEMO_JUNK_OBJECT", `MODULE:${moduleSegment}`],
+    reasoning: "This is one of the seeded demo junk asset modules. It is intentionally malicious and should be quarantined immediately.",
+    clean_method: "vault_burn",
+  };
 }
 
 const SYSTEM_PROMPT = `You are a blockchain security analyst specializing in Sui Move smart contracts.
@@ -244,6 +274,10 @@ function enqueueModelCall<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 export async function analyzeThreat(input: ThreatAnalysisInput): Promise<ThreatAnalysisOutput> {
+  if (isDemoJunkAsset(input)) {
+    return makeDemoJunkAnalysis(input);
+  }
+
   if (!GITHUB_MODELS_TOKEN) {
     logger.warn("GITHUB_MODELS_TOKEN not set, returning mock analysis");
     return mockAnalysis(input);
@@ -416,9 +450,11 @@ export interface BatchThreatOutput {
 export async function analyzeThreatBatch(
   inputs: BatchThreatInput[]
 ): Promise<BatchThreatOutput[]> {
+  const demoJunkOverrides = inputs.map((input) => isDemoJunkAsset(input) ? makeDemoJunkAnalysis(input) : null);
+
   if (!GITHUB_MODELS_TOKEN) {
     logger.warn("GITHUB_MODELS_TOKEN not set, returning mock batch analysis");
-    return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
+    return inputs.map((input, index) => ({ objectId: input.objectId, ...(demoJunkOverrides[index] ?? mockAnalysis(input)) }));
   }
 
   // BUG FIX #2: Compute static signals for each object so batch gets same data as single analysis
@@ -487,8 +523,8 @@ No markdown, no explanation before or after the array.
 
 ${itemsText}`;
 
-  const MAX_RETRIES = 3;
-  const BASE_DELAY_MS = 8_000;
+  const MAX_RETRIES = 5;
+  const BASE_DELAY_MS = 10_000;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -514,13 +550,14 @@ ${itemsText}`;
       });
 
       if (response.status === 429 || response.status === 503) {
-        const delay = BASE_DELAY_MS * attempt;
+        const retryAfter = Number(response.headers.get("retry-after") ?? 0) * 1000;
+        const delay = retryAfter || BASE_DELAY_MS * attempt;
         if (attempt < MAX_RETRIES) {
           logger.warn({ attempt, status: response.status }, "GitHub Models throttled (batch) — retrying");
           await sleep(delay);
           continue;
         }
-        logger.warn("GitHub Models batch persistently throttled — using mock fallback");
+        logger.warn({ attempts: MAX_RETRIES, status: response.status }, "GitHub Models batch persistently throttled — using mock fallback");
         return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
       }
 
@@ -558,6 +595,9 @@ ${itemsText}`;
 
       // Validate and sanitize each result; fall back per-item to mock if missing
       return inputs.map((input, i) => {
+        if (demoJunkOverrides[i]) {
+          return { objectId: input.objectId, ...demoJunkOverrides[i]! };
+        }
         const r = parsed[i];
         if (!r) return { objectId: input.objectId, ...mockAnalysis(input) };
         return {
@@ -573,15 +613,15 @@ ${itemsText}`;
       });
     } catch (err) {
       if (attempt === MAX_RETRIES) {
-        logger.warn({ err }, "GitHub Models batch unavailable after retries — using mock fallback");
-        return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
+        logger.warn({ err, attempts: MAX_RETRIES }, "GitHub Models batch unavailable after retries — using mock fallback");
+        return inputs.map((input, index) => ({ objectId: input.objectId, ...(demoJunkOverrides[index] ?? mockAnalysis(input)) }));
       }
       logger.warn({ err, attempt }, "GitHub Models batch failed — retrying");
       await sleep(BASE_DELAY_MS * attempt);
     }
   }
 
-  return inputs.map((input) => ({ objectId: input.objectId, ...mockAnalysis(input) }));
+  return inputs.map((input, index) => ({ objectId: input.objectId, ...(demoJunkOverrides[index] ?? mockAnalysis(input)) }));
 }
 
 function validateVerdict(v: unknown): "SAFE" | "SUSPICIOUS" | "MALICIOUS" {
@@ -596,6 +636,10 @@ function validateVerdict(v: unknown): "SAFE" | "SUSPICIOUS" | "MALICIOUS" {
  * safe NFT, no-metadata edge case).
  */
 function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
+  if (isDemoJunkAsset(input)) {
+    return makeDemoJunkAnalysis(input);
+  }
+
   const url = input.displayUrl ?? "";
   const abi = typeof input.moveAbi === "string" ? input.moveAbi : "";
   const objType = input.objectType ?? "";

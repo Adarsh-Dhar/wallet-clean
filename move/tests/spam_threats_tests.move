@@ -18,7 +18,7 @@ module deepclean_spam::spam_threats_tests {
     fun test_malicious_airdrop_mints() {
         let mut s = scenario();
         ts::next_tx(&mut s, OWNER);
-        malicious_airdrop::mint(ts::ctx(&mut s));
+        malicious_airdrop::mint(OWNER, ts::ctx(&mut s));
         ts::end(s);
     }
 
@@ -26,7 +26,7 @@ module deepclean_spam::spam_threats_tests {
     fun test_fake_foundation_nft_mints() {
         let mut s = scenario();
         ts::next_tx(&mut s, OWNER);
-        fake_foundation_nft::mint(ts::ctx(&mut s));
+        fake_foundation_nft::mint(OWNER, ts::ctx(&mut s));
         ts::end(s);
     }
 
@@ -42,7 +42,7 @@ module deepclean_spam::spam_threats_tests {
     fun test_spoofed_pool_mints() {
         let mut s = scenario();
         ts::next_tx(&mut s, OWNER);
-        pool::fake_mint(ts::ctx(&mut s));
+        pool::fake_mint(OWNER, ts::ctx(&mut s));
         ts::end(s);
     }
 
@@ -50,7 +50,7 @@ module deepclean_spam::spam_threats_tests {
     fun test_honeypot_stake_mints() {
         let mut s = scenario();
         ts::next_tx(&mut s, OWNER);
-        honeypot_defi::stake_and_receive(ts::ctx(&mut s));
+        honeypot_defi::stake_and_receive(OWNER, ts::ctx(&mut s));
         ts::end(s);
     }
 
@@ -59,7 +59,7 @@ module deepclean_spam::spam_threats_tests {
     fun test_honeypot_withdraw_aborts() {
         let mut s = scenario();
         ts::next_tx(&mut s, OWNER);
-        honeypot_defi::stake_and_receive(ts::ctx(&mut s));
+        honeypot_defi::stake_and_receive(OWNER, ts::ctx(&mut s));
         ts::next_tx(&mut s, OWNER);
         let token = ts::take_from_address<honeypot_defi::HoneypotToken>(&mut s, OWNER);
         honeypot_defi::withdraw(token, ts::ctx(&mut s));

@@ -119,13 +119,12 @@ async function main() {
 
   const authHeader = { Authorization: `Bearer ${token}` };
 
-  // ── Step 2: Seed threats from on-chain ──────────────────────────────────
+  // ── Step 2: Seed on-chain junk ──────────────────────────────────────────
 
-  console.log("  ┌─ STEP 2: Seed Threats ─────────────────────────────────┐");
+  console.log("  ┌─ STEP 2: Seed On-Chain Junk ────────────────────────────┐");
   console.log("  │");
-  let populatedThreats = [];
   try {
-    console.log("    📡 Detecting on-chain objects...");
+    console.log("    📡 Seeding on-chain junk objects...");
     const populateRes = await fetch(`${api}/api/populate-wallet`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeader },
@@ -137,169 +136,22 @@ async function main() {
     }
 
     const populateData = await populateRes.json();
-    populatedThreats = Array.isArray(populateData.threats) ? populateData.threats : [];
-    const threatsCount = populatedThreats.filter((threat) => threat?.threatId !== null).length;
-    console.log(`    ✓ Detected ${threatsCount} threat(s)\n`);
+    const injected = Number(populateData.injected ?? 0);
+    const digests = Array.isArray(populateData.digests) ? populateData.digests : [];
+
+    console.log(`    ✓ Seeded ${injected} junk object(s)`);
+    if (digests.length > 0) {
+      console.log(`    ✓ Submitted ${digests.length} transaction(s)`);
+    }
+    console.log();
   } catch (err) {
     console.error(`    ✗ ${err.message}\n`);
     process.exit(1);
   }
   console.log("  └────────────────────────────────────────────────────────┘\n");
 
-  // ── Step 3: Fetch and clean threats ────────────────────────────────────
-
-  console.log("  ┌─ STEP 3: Clean Wallet ─────────────────────────────────┐");
-  console.log("  │");
-
-  const threats = populatedThreats.filter((threat) => threat?.threatId !== null);
-  try {
-    console.log("    📋 Using quarantined threats returned by populate-wallet...");
-    console.log(`    ✓ Found ${threats.length} threat(s)\n`);
-  } catch (err) {
-    console.error(`    ✗ Failed to fetch threats: ${err.message}\n`);
-    process.exit(1);
-  }
-
-  if (threats.length === 0) {
-    console.log("    ✗ No quarantined threats were returned, so nothing was cleaned.\n");
-    console.log("  └────────────────────────────────────────────────────────┘\n");
-  } else {
-    // Build and execute burn transaction
-    let digest;
-    try {
-      console.log("    🔥 Building burn transaction...");
-      
-      // Validate that all threats have objectIds
-      const validThreats = threats.filter((t) => {
-        if (!t.objectId) {
-          console.warn(`    ⚠ Skipping threat without objectId: ${JSON.stringify(t)}`);
-          return false;
-        }
-        return true;
-      });
-
-      if (validThreats.length === 0) {
-        throw new Error("No valid objects to burn");
-      }
-
-      if (validThreats.length !== threats.length) {
-        console.log(`    ⚠ Warning: ${threats.length - validThreats.length} threat(s) skipped due to missing objectId`);
-      }
-
-      const tx = new Transaction();
-      const objectsToTransfer = validThreats.map((t) => tx.object(t.objectId));
-      const deadAddress = "0x0000000000000000000000000000000000000000000000000000000000000000";
-
-      tx.transferObjects(objectsToTransfer, tx.pure.address(deadAddress));
-
-      console.log("    ⛓️  Signing and executing on-chain...");
-      const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl(network), network });
-      const result = await client.signAndExecuteTransaction({
-        transaction: tx,
-        signer: keypair,
-        options: { showEffects: true },
-      });
-
-      if (result.effects?.status?.status !== "success") {
-        throw new Error(`TX failed: ${JSON.stringify(result.effects?.status)}`);
-      }
-
-      digest = result.digest;
-      console.log(`    ✓ Burned ${validThreats.length} object(s)\n`);
-    } catch (err) {
-      console.error(`    ✗ Transaction failed: ${err.message}\n`);
-      process.exit(1);
-    }
-
-    // Mark as burned in DB
-    try {
-      console.log("    💾 Updating database...");
-      const cleanRes = await fetch(`${api}/api/clean-wallet`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeader },
-        body: JSON.stringify({
-          threatIds: threats.map((t) => t.id),
-          burnTxDigest: digest,
-        }),
-      });
-
-      if (!cleanRes.ok) {
-        throw new Error(`HTTP ${cleanRes.status}`);
-      }
-      console.log(`    ✓ Marked as burned in DB\n`);
-      console.log(`    Burn TX: ${digest}`);
-      console.log(`    Verify : https://suiscan.xyz/testnet/tx/${digest}\n`);
-    } catch (err) {
-      console.error(`    ✗ DB update failed: ${err.message}\n`);
-      process.exit(1);
-    }
-  }
-
-  console.log("  └────────────────────────────────────────────────────────┘\n");
-
-  // ── Step 4: Verify ──────────────────────────────────────────────────────
-
-  console.log("  ┌─ STEP 4: Verify Clean ─────────────────────────────────┐");
-  console.log("  │");
-
-  try {
-    console.log("    🔍 Checking on-chain objects...");
-    const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl(network), network });
-    const ownedObjects = await client.getOwnedObjects({
-      owner: address,
-      options: { showType: true },
-    });
-
-    const spamPackage = "0xe933d9d3e69b29d0183ffbcecaacf7ec8dbc3832f99815760f0d34913c2c1ca4";
-    const spamObjects = (ownedObjects.data ?? []).filter((o) =>
-      o.data?.type?.includes(spamPackage)
-    );
-
-    if (spamObjects.length === 0) {
-      console.log("    ✓ No spam objects found on-chain\n");
-    } else {
-      console.log(`    ✗ ${spamObjects.length} spam object(s) still in wallet\n`);
-      spamObjects.forEach((o) => {
-        console.log(`      - ${o.data?.type?.split("::").pop()}`);
-      });
-      console.log("");
-    }
-
-    console.log("    📊 Checking database...");
-    const dbCheckRes = await fetch(
-      `${api}/api/threats?walletAddress=${encodeURIComponent(address)}&limit=200`,
-      { headers: authHeader }
-    );
-
-    if (!dbCheckRes.ok) {
-      throw new Error(`HTTP ${dbCheckRes.status}`);
-    }
-
-    const allThreats = await dbCheckRes.json();
-    const quarantined = allThreats.filter((t) => t.status === "quarantined");
-    const burned = allThreats.filter((t) => t.status === "burned");
-
-    if (quarantined.length === 0) {
-      console.log(`    ✓ No quarantined threats in DB`);
-      console.log(`    ✓ ${burned.length} threat(s) marked as burned\n`);
-    } else {
-      console.log(`    ✗ ${quarantined.length} threat(s) still quarantined\n`);
-    }
-
-    if (spamObjects.length > 0 || quarantined.length > 0) {
-      throw new Error("Verification failed: residual spam or quarantined threats remain");
-    }
-  } catch (err) {
-    console.error(`    ⚠  Verification check failed: ${err.message}\n`);
-    process.exit(1);
-  }
-
-  console.log("  └────────────────────────────────────────────────────────┘\n");
-
-  // ── Summary ────────────────────────────────────────────────────────────
-
   console.log("  ═══════════════════════════════════════════════════════════");
-  console.log("  ✓  DEMO COMPLETE — Wallet cleaned and verified!");
+  console.log("  ✓  DEMO COMPLETE — Wallet seeded with junk objects only!");
   console.log("  ═══════════════════════════════════════════════════════════\n");
 }
 
