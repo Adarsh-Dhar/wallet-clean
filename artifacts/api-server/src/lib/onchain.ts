@@ -40,21 +40,42 @@ function getClient(): SuiJsonRpcClient {
   return _client;
 }
 
-/** True when all three env vars are present — used to gate calls at the call site */
-export function isOnChainEnabled(): boolean {
-  // Read env vars lazily (after dotenv.config() has run)
-  const PACKAGE_ID     = process.env["QUARANTINE_PACKAGE_ID"];
-  const ADMIN_CAP_ID   = process.env["QUARANTINE_ADMIN_CAP_ID"];
-  const AGENT_PRIV_KEY = process.env["AGENT_PRIVATE_KEY"];
+export interface OnChainConfigStatus {
+  onChainEnabled: boolean;
+  missingVars: string[];
+  privateKeyParseable: boolean;
+}
 
-  // Ensure required env vars are present and the agent key is parseable
-  if (!PACKAGE_ID || !ADMIN_CAP_ID || !AGENT_PRIV_KEY) return false;
-  try {
-    const parsed = parseAgentPrivateKey(AGENT_PRIV_KEY);
-    return parsed !== null;
-  } catch (e) {
-    return false;
+/**
+ * Returns detailed on-chain env validation so callers can surface actionable errors.
+ */
+export function getOnChainConfigStatus(): OnChainConfigStatus {
+  const PACKAGE_ID = process.env["QUARANTINE_PACKAGE_ID"]?.trim();
+  const ADMIN_CAP_ID = process.env["QUARANTINE_ADMIN_CAP_ID"]?.trim();
+  const AGENT_PRIV_KEY = process.env["AGENT_PRIVATE_KEY"]?.trim();
+
+  const missingVars: string[] = [];
+  if (!PACKAGE_ID) missingVars.push("QUARANTINE_PACKAGE_ID");
+  if (!ADMIN_CAP_ID) missingVars.push("QUARANTINE_ADMIN_CAP_ID");
+  if (!AGENT_PRIV_KEY) missingVars.push("AGENT_PRIVATE_KEY");
+
+  let privateKeyParseable = false;
+  if (AGENT_PRIV_KEY) {
+    privateKeyParseable = parseAgentPrivateKey(AGENT_PRIV_KEY) !== null;
   }
+
+  const onChainEnabled = missingVars.length === 0 && privateKeyParseable;
+
+  return {
+    onChainEnabled,
+    missingVars,
+    privateKeyParseable,
+  };
+}
+
+/** True when all three env vars are present and the agent key is parseable. */
+export function isOnChainEnabled(): boolean {
+  return getOnChainConfigStatus().onChainEnabled;
 }
 
 export interface QuarantineOnChainParams {

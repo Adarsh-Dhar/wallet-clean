@@ -21,6 +21,8 @@ interface LogEntry {
 interface PopulateResult {
   injected: number;
   quarantined: number;
+  syntheticCount?: number;
+  realCount?: number;
   txDigest: string | null;
   threats: Array<{
     objectId: string;
@@ -355,7 +357,12 @@ export default function Wallets() {
       setPopulating(false);
 
       appendPopulateLog(key, mkLog("info", "API response received"));
-      appendPopulateLog(key, mkLog("info", `${result.injected} objects analyzed (synthetic fixtures + real wallet)`));
+      const syntheticCount = result.syntheticCount ?? 0;
+      const realCount = result.realCount ?? result.injected;
+      appendPopulateLog(
+        key,
+        mkLog("info", `${result.injected} objects analyzed (${syntheticCount} synthetic fixtures + ${realCount} real wallet objects)`),
+      );
 
       result.threats.forEach((threat, index) => {
         const isQuarantined = threat.threatId !== null;

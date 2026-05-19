@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startMonitor } from "./lib/monitor";
-import { isOnChainEnabled } from "./lib/onchain";
+import { getOnChainConfigStatus } from "./lib/onchain";
 import { prisma } from "@workspace/db";
 
 // Load .env from root directory
@@ -34,7 +34,28 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
   const REAL_ONCHAIN = (process.env["REAL_ONCHAIN"] ?? "false").toLowerCase() === "true";
-  logger.info({ REAL_ONCHAIN, onChainEnabled: isOnChainEnabled() }, "On-chain configuration");
+  const onChainConfig = getOnChainConfigStatus();
+  logger.info(
+    {
+      REAL_ONCHAIN,
+      onChainEnabled: onChainConfig.onChainEnabled,
+      missingOnChainVars: onChainConfig.missingVars,
+      privateKeyParseable: onChainConfig.privateKeyParseable,
+    },
+    "On-chain configuration"
+  );
+
+  if (REAL_ONCHAIN && !onChainConfig.onChainEnabled) {
+    logger.error(
+      {
+        missingOnChainVars: onChainConfig.missingVars,
+        privateKeyParseable: onChainConfig.privateKeyParseable,
+      },
+      "REAL_ONCHAIN=true but on-chain configuration is incomplete. Refusing to start."
+    );
+    process.exit(1);
+  }
+
   (async () => {
     // Validate DB connection early so misconfigured DATABASE_URL fails fast.
     try {

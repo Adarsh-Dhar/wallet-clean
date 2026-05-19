@@ -22,6 +22,9 @@ import { useToast } from "@/hooks/use-toast";
 interface PopulateResult {
   injected: number;
   quarantined: number;
+  seededCount?: number;
+  syntheticCount?: number;
+  realCount?: number;
   txDigest: string | null;
   onChainDigest?: string | null;
   threats: Array<{
@@ -126,9 +129,22 @@ export default function Wallets() {
         ? ` On-chain proof recorded.`
         : "";
 
+      const breakdown: string[] = [];
+      if (result.seededCount && result.seededCount > 0) {
+        breakdown.push(`${result.seededCount} on-chain seeded`);
+      }
+      if (result.syntheticCount && result.syntheticCount > 0) {
+        breakdown.push(`${result.syntheticCount} synthetic`);
+      }
+      if (result.realCount && result.realCount > 0) {
+        breakdown.push(`${result.realCount} real wallet`);
+      }
+
+      const breakdownText = breakdown.length > 0 ? ` (${breakdown.join(", ")})` : "";
+
       toast({
         title: `${result.quarantined} threats quarantined`,
-        description: `Seeded ${result.injected} spam objects — ${result.quarantined} were auto-quarantined by the AI agent.${onChainNote}`,
+        description: `Seeded ${result.injected} spam objects${breakdownText} — ${result.quarantined} were auto-quarantined by the AI agent.${onChainNote}`,
       });
     },
     onError: (error) => {
