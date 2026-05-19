@@ -20,6 +20,7 @@ export interface ThreatAnalysisOutput {
   confidence: number;
   flags: string[];
   reasoning: string;
+  clean_method: "transfer_to_dead" | "merge_dust" | "vault_burn" | "release";
 }
 
 // Layer 0: Static pre-filter
@@ -180,7 +181,8 @@ Return ONLY valid JSON with this exact schema:
   "reason_code": <1=honeypot|2=phishing|3=spoofed_address|4=spam|5=unknown>,
   "confidence": <0.0-1.0>,
   "flags": ["<specific finding>"],
-  "reasoning": "<2-3 sentence plain English explanation>"
+  "reasoning": "<2-3 sentence plain English explanation>",
+  "clean_method": "transfer_to_dead" | "merge_dust" | "vault_burn" | "release"
 }
 
 Scoring guidance:
@@ -196,6 +198,13 @@ Reasoning steps you must follow:
 5. If only URGENCY_LANGUAGE or SUSPICIOUS_URL_PATTERN -> score 50-70, verdict SUSPICIOUS unless combined with others.
 6. BULK_SENDER alone is not conclusive - only add 10-15 points.
 7. After applying the above rules, check for anything the static signals may have missed (semantic deception, novel patterns).
+
+clean_method selection rules (apply in order, first match wins):
+1. If objectType contains "::coin::Coin<" AND BULK_SENDER flag is present → "merge_dust"
+2. If DANGEROUS_ABI flag is present (drain/sweep/freeze/migrate in ABI) → "vault_burn"
+3. If KNOWN_ATTACK_MODULE flag is present → "vault_burn"
+4. If verdict is SAFE or SUSPICIOUS and was previously quarantined → "release"
+5. All other MALICIOUS verdicts (phishing NFTs, airdrop tokens, fake governance, impersonation) → "transfer_to_dead"
 
 Check for these patterns the static analyser cannot see:
 - Subtle metadata spoofing (logo URL correct but display name slightly off)
@@ -365,6 +374,7 @@ Analyze this asset and return ONLY the JSON verdict.`;
           confidence: Math.max(0, Math.min(1, parsed.confidence ?? 0.5)),
           flags: Array.isArray(parsed.flags) ? parsed.flags : [],
           reasoning: parsed.reasoning ?? "No reasoning provided",
+          clean_method: validateCleanMethod(parsed.clean_method),
         };
       } catch (err) {
         if (attempt === MAX_RETRIES) {
@@ -400,6 +410,7 @@ export interface BatchThreatOutput {
   confidence: number;
   flags: string[];
   reasoning: string;
+  clean_method: "transfer_to_dead" | "merge_dust" | "vault_burn" | "release";
 }
 
 export async function analyzeThreatBatch(
@@ -557,6 +568,7 @@ ${itemsText}`;
           confidence: Math.max(0, Math.min(1, r.confidence ?? 0.5)),
           flags: Array.isArray(r.flags) ? r.flags : [],
           reasoning: r.reasoning ?? "No reasoning provided",
+          clean_method: validateCleanMethod(r.clean_method),
         };
       });
     } catch (err) {
@@ -598,6 +610,7 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
       reason_code: 5,
       confidence: 0.99,
       flags: [],
+      clean_method: "release",
       reasoning:
         "Object belongs to a Sui system package. System packages are verified and safe.",
     };
@@ -619,6 +632,7 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
       reason_code: 5,
       confidence: 0.92,
       flags: [],
+      clean_method: "release",
       reasoning:
         "The display URL points to a known legitimate domain. No suspicious metadata or ABI patterns detected.",
     };
@@ -632,6 +646,7 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
       reason_code: 5,
       confidence: 0.40,
       flags: ["No metadata available"],
+      clean_method: "release",
       reasoning:
         "Insufficient metadata to determine threat status. No malicious indicators found, but confidence is low.",
     };
@@ -648,6 +663,7 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
       reason_code: 1,
       confidence: 0.97,
       flags: ["Honeypot ABI signature detected", "Hidden drain or covert-transfer function"],
+      clean_method: "vault_burn",
       reasoning:
         "The Move ABI contains function signatures associated with honeypot contracts that covertly drain caller funds. This object should be quarantined immediately.",
     };
@@ -661,6 +677,7 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
       reason_code: 2,
       confidence: 0.96,
       flags: ["Unicode homoglyph characters detected in URL", "Lookalike domain attack"],
+      clean_method: "transfer_to_dead",
       reasoning:
         "The display URL contains non-ASCII characters that visually mimic ASCII letters. This is a classic homoglyph phishing technique designed to spoof legitimate domains.",
     };
@@ -675,6 +692,7 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
       reason_code: 2,
       confidence: 0.90,
       flags: ["Digit substitution detected in domain (homoglyph)", "Lookalike domain"],
+      clean_method: "transfer_to_dead",
       reasoning:
         "The URL domain uses a digit ('0') in place of the letter 'o' — a common homoglyph phishing technique to spoof trusted domains.",
     };
@@ -693,6 +711,7 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
       reason_code: isHoneypot ? 1 : 4,
       confidence: 0.87,
       flags: ["Malicious URL pattern detected", "Domain matches known spam/phishing pattern"],
+      clean_method: "transfer_to_dead",
       reasoning:
         "The display URL matches patterns associated with spam airdrops or phishing campaigns targeting Sui wallet users. The object exhibits no legitimate utility.",
     };
@@ -705,7 +724,13 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
     reason_code: 5,
     confidence: 0.82,
     flags: [],
+    clean_method: "release",
     reasoning:
       "No malicious patterns detected. The object type and metadata appear consistent with a legitimate asset. No suspicious function signatures or phishing indicators found.",
   };
+}
+
+function validateCleanMethod(v: unknown): ThreatAnalysisOutput["clean_method"] {
+  if (v === "transfer_to_dead" || v === "merge_dust" || v === "vault_burn" || v === "release") return v;
+  return "transfer_to_dead"; // safe default
 }

@@ -23,6 +23,7 @@ export interface Threat {
   confidence: number;
   flags: string[];
   reasoning: string;
+  cleanMethod: "transfer_to_dead" | "merge_dust" | "vault_burn" | "release";
   status: ThreatStatus;
   /** @nullable */
   walrusBlobId?: string | null;

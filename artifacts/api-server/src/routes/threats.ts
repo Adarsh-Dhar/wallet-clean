@@ -113,6 +113,7 @@ router.post("/threats/analyze", async (req, res) => {
             confidence:    verdict.confidence,
             flags:         verdict.flags,
             reasoning:     verdict.reasoning,
+            cleanMethod:   verdict.clean_method,
             status:        "quarantined",
           },
         }),
@@ -342,6 +343,27 @@ router.post("/clean-wallet", async (req, res) => {
   });
 
   req.log.info({ count: idsToUpdate.length, digest }, "Wallet-signed deep clean recorded");
+
+  // Fire-and-forget: call vault_burn server-side for threats classified as vault_burn
+  if (isOnChainEnabled()) {
+    const vaultBurnThreats = await prisma.threat.findMany({
+      where: { id: { in: idsToUpdate }, cleanMethod: "vault_burn" },
+      select: { id: true, objectId: true, objectType: true },
+    });
+    Promise.allSettled(
+      vaultBurnThreats.map(t =>
+        sendToDeadOnChain({ objectId: t.objectId, objectType: t.objectType })
+          .then((digest) =>
+            digest
+              ? prisma.threat.update({
+                  where: { id: t.id },
+                  data: { burnTxDigest: digest },
+                })
+              : null
+          )
+      )
+    ).catch(() => {});
+  }
 
   res.json({
     cleaned: idsToUpdate.length,

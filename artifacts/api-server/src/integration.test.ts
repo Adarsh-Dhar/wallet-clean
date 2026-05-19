@@ -75,6 +75,8 @@ describe('POST /api/populate-wallet', () => {
     expect(response.data).toHaveProperty('quarantined');
     expect(response.data).toHaveProperty('threats');
     expect(Array.isArray(response.data.threats)).toBe(true);
+    expect(response.data.injected).toBeGreaterThanOrEqual(16);
+    expect(response.data.threats.length).toBeGreaterThanOrEqual(16);
   });
 
   it('should return objects with correct threat structure', async () => {

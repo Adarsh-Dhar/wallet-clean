@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
 import { useQueryClient, useMutation } from "@tanstack/react-query";
-import { getGetDashboardStatsQueryKey, getListThreatsQueryKey } from "@workspace/api-client-react";
+import { getGetDashboardStatsQueryKey, getListThreatsQueryKey, getListWatchedWalletsQueryKey } from "@workspace/api-client-react";
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, ExternalLink, Loader2, Shield, Wallet, X, XCircle, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiJson } from "@/lib/auth";
@@ -28,6 +28,7 @@ interface PopulateResult {
     verdict: string;
     riskScore: number;
     threatId: number | null;
+    error?: string;
   }>;
 }
 
@@ -41,6 +42,7 @@ interface QuarantinedThreat {
   objectId: string;
   objectType: string;
   senderAddress: string;
+  cleanMethod: "transfer_to_dead" | "merge_dust" | "vault_burn" | "release";
 }
 
 const levelStyle: Record<LogLevel, string> = {
@@ -262,11 +264,44 @@ export default function Wallets() {
       return false;
     }
 
+    // Group by clean_method to apply the right action
+    const toTransfer = validThreats.filter(t => t.cleanMethod === "transfer_to_dead" || t.cleanMethod === "vault_burn");
+    const toDust     = validThreats.filter(t => t.cleanMethod === "merge_dust");
+    const toSkip     = validThreats.filter(t => t.cleanMethod === "release");
+
+    if (toSkip.length > 0) {
+      appendCleanLog(key, mkLog("info", `Skipping ${toSkip.length} objects flagged for review (release)`));
+    }
+
     const tx = new Transaction();
-    tx.transferObjects(
-      resolvedObjects.map(({ objectId }) => tx.object(objectId)),
-      tx.pure.address(deadAddress),
-    );
+
+    // Standard transfer: phishing NFTs, airdrop tokens, fake governance, dangerous ABI objects
+    if (toTransfer.length > 0) {
+      const resolved = resolvedObjects.filter(r => toTransfer.some(t => t.objectId === r.objectId));
+      if (resolved.length > 0) {
+        tx.transferObjects(
+          resolved.map(({ objectId }) => tx.object(objectId)),
+          tx.pure.address(deadAddress),
+        );
+        appendCleanLog(key, mkLog("info", `  → transferObjects: ${resolved.length} objects`));
+      }
+    }
+
+    // Dust merge: group by coin type, merge within each group, then send merged coin to dead
+    if (toDust.length > 0) {
+      const byType: Record<string, string[]> = {};
+      toDust.forEach(t => {
+        (byType[t.objectType] ??= []).push(t.objectId);
+      });
+      for (const [coinType, ids] of Object.entries(byType)) {
+        const ownedIds = ids.filter(id => resolvedObjects.some(r => r.objectId === id));
+        if (ownedIds.length === 0) continue;
+        const [primary, ...rest] = ownedIds.map(id => tx.object(id));
+        if (rest.length > 0) tx.mergeCoins(primary, rest);
+        tx.transferObjects([primary], tx.pure.address(deadAddress));
+        appendCleanLog(key, mkLog("info", `  → mergeCoins + transfer: ${ownedIds.length} dust coins (${coinType})`));
+      }
+    }
 
     appendCleanLog(key, mkLog("info", "Wallet popup opening — please approve the transaction…"));
 
@@ -312,16 +347,15 @@ export default function Wallets() {
       appendPopulateLog(key, mkLog("info", "Starting wallet population…"));
       appendPopulateLog(key, mkLog("info", `Target: ${address}`));
       appendPopulateLog(key, mkLog("info", "POST /api/populate-wallet →"));
-      appendPopulateLog(key, mkLog("info", "Scanning live wallet objects for threat analysis…"));
-      appendPopulateLog(key, mkLog("info", "Fetching owned objects from the connected wallet"));
-      appendPopulateLog(key, mkLog("info", "Sending wallet objects to GitHub Models for analysis…"));
+      appendPopulateLog(key, mkLog("info", "Injecting full synthetic fixture set (16 threat types) + real wallet objects…"));
+      appendPopulateLog(key, mkLog("info", "Sending objects to GitHub Models for analysis…"));
     },
     onSuccess: (result, { address }) => {
       const key = address;
       setPopulating(false);
 
       appendPopulateLog(key, mkLog("info", "API response received"));
-      appendPopulateLog(key, mkLog("info", `${result.injected} objects analyzed`));
+      appendPopulateLog(key, mkLog("info", `${result.injected} objects analyzed (synthetic fixtures + real wallet)`));
 
       result.threats.forEach((threat, index) => {
         const isQuarantined = threat.threatId !== null;
@@ -333,6 +367,10 @@ export default function Wallets() {
             `       ${threat.objectType}`,
           ),
         );
+
+        if (threat.error) {
+          appendPopulateLog(key, mkLog("error", `    ↳ ${threat.error}`));
+        }
       });
 
       const quarantined = result.threats.filter((threat) => threat.threatId !== null);
@@ -363,6 +401,7 @@ export default function Wallets() {
       appendPopulateLog(key, mkLog("success", "Population complete."));
 
       queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getListWatchedWalletsQueryKey() });
       queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
 
       toast({

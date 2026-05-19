@@ -327,7 +327,7 @@ components:
 
     Threat:
       type: object
-      required: [id, objectId, objectType, senderAddress, riskScore, verdict, reasonCode, confidence, flags, reasoning, status, detectedAt]
+      required: [id, objectId, objectType, senderAddress, riskScore, verdict, reasonCode, confidence, flags, reasoning, status, cleanMethod, detectedAt]
       properties:
         id:
           type: integer
@@ -356,6 +356,9 @@ components:
             type: string
         reasoning:
           type: string
+        cleanMethod:
+          type: string
+          enum: [transfer_to_dead, merge_dust, vault_burn, release]
         status:
           type: string
           enum: [quarantined, released, burned]
@@ -389,7 +392,7 @@ components:
 
     ThreatAnalysisResult:
       type: object
-      required: [riskScore, verdict, reasonCode, confidence, flags, reasoning]
+      required: [riskScore, verdict, reasonCode, confidence, flags, reasoning, cleanMethod]
       properties:
         riskScore:
           type: integer
@@ -406,6 +409,9 @@ components:
             type: string
         reasoning:
           type: string
+        cleanMethod:
+          type: string
+          enum: [transfer_to_dead, merge_dust, vault_burn, release]
         savedThreatId:
           type: ["integer", "null"]
 

@@ -13,57 +13,210 @@ const router = Router();
 const SPAM_PACKAGE_ID =
   process.env["QUARANTINE_PACKAGE_ID"] ??
   "0xe933d9d3e69b29d0183ffbcecaacf7ec8dbc3832f99815760f0d34913c2c1ca4";
-
-// Metadata we know about each deployed module — used to enrich objects
-// fetched from the chain with display names and URLs (since display objects
-// are separate on-chain and not always returned by getOwnedObjects)
+// Metadata we know about each deployed module — used to enrich real wallet objects
+// fetched from the chain with display names and URLs
 const KNOWN_OBJECT_META: Record<string, { displayName: string; displayUrl: string; moveAbi?: string }> = {
-  [`${SPAM_PACKAGE_ID}::malicious_airdrop::AirdropToken`]: {
-    displayName: "5000 SUI Airdrop — Claim Expires in 24h",
-    displayUrl:  "https://sui-airdrop-2026.xyz/claim",
-  },
-  [`${SPAM_PACKAGE_ID}::fake_foundation_nft::FounderPass`]: {
-    displayName: "Sui Foundation VIP Founder Pass",
-    displayUrl:  "https://su\u0456.io/founder-claim",  // Cyrillic і — real homoglyph
-  },
-  [`${SPAM_PACKAGE_ID}::honeypot_defi::HoneypotToken`]: {
-    displayName: "SuiGold — 10\u00d7 APY Yield Protocol",
-    displayUrl:  "https://suigold-defi.xyz/stake",
-    moveAbi: JSON.stringify({
-      functions: [
-        { name: "stake_and_receive", visibility: "public",  params: ["address"] },
-        { name: "withdraw",          visibility: "public",  params: ["HoneypotToken"] },
-        { name: "drain_all_hidden",  visibility: "private", params: ["&mut TxContext"] },
-      ],
-    }),
-  },
-  [`${SPAM_PACKAGE_ID}::rug_token::MemeCoin`]: {
-    displayName: "SuiDoge — 100x Meme Coin",
-    displayUrl:  "https://suidoge-token.xyz/stake",
-    moveAbi: JSON.stringify({
-      functions: [
-        { name: "airdrop_to",    visibility: "public",  params: ["address"] },
-        { name: "freeze_all",    visibility: "public",  params: ["&AdminCap"] },
-        { name: "migrate_funds", visibility: "public",  params: ["&AdminCap", "address"] },
-      ],
-    }),
-  },
-  [`${SPAM_PACKAGE_ID}::spoofed_pool::Position`]: {
-    displayName: "Cetus LP Position",
-    displayUrl:  "https://cetus.zone/position",
-    moveAbi: JSON.stringify({
-      functions: [
-        { name: "fake_mint",    visibility: "public", params: [] },
-        { name: "collect_fees", visibility: "public", params: ["&Position"] },
-      ],
-    }),
-  },
   // Dust attack — it's a plain Coin<SUI>, no custom metadata
   "0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin": {
     displayName: "SUI",
     displayUrl:  "",
   },
 };
+
+function syntheticObjectId(index: number): string {
+  return `0x${index.toString(16).padStart(64, "0")}`;
+}
+
+
+// ─── Synthetic Fixture Set ───────────────────────────────────────────────────
+// All junk types the AI needs to classify, injected directly into the analysis
+// pipeline so every threat category is always present for testing, regardless
+// of what's on-chain. These are synthetic objects with fake objectIds.
+
+function buildSyntheticFixtures(targetAddress: string): ChainObject[] {
+  return [
+    // 1. Fake airdrop token — urgency language + suspicious TLD
+    {
+      objectId:      syntheticObjectId(1),
+      objectType:    "0xdead0001::scam_airdrop::FreeToken",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000001",
+      displayName:   "FREE 5000 SUI — Exclusive Airdrop, Claim Expires in 24h",
+      displayUrl:    "https://free-sui-tokens.xyz/airdrop/claim",
+      moveAbi:       null,
+    },
+    // 2. Cyrillic homoglyph phishing — non-ASCII in URL
+    {
+      objectId:      syntheticObjectId(2),
+      objectType:    "0xdead0002::phishing_kit::WalletDrainer",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000002",
+      displayName:   "Official Sui Wallet Connect",
+      displayUrl:    "https://su\u0456.io/connect",  // Cyrillic і
+      moveAbi:       null,
+    },
+    // 3. Honeypot DeFi — dangerous ABI (_drain_all)
+    {
+      objectId:      syntheticObjectId(3),
+      objectType:    "0xdead0003::honeypot_defi::HoneypotToken",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000003",
+      displayName:   "SuiGold — 10x APY DeFi Protocol",
+      displayUrl:    "https://suigold-defi.xyz/stake",
+      moveAbi:       JSON.stringify({
+        functions: [
+          { name: "_drain_all",  visibility: "private", params: ["&mut 0x2::coin::Coin<0x2::sui::SUI>"] },
+          { name: "stake_free",  visibility: "public",  params: ["address"] },
+          { name: "withdraw",    visibility: "public",  params: ["HoneypotToken"] },
+        ],
+      }),
+    },
+    // 4. Digit-substitution domain — f0undation
+    {
+      objectId:      syntheticObjectId(4),
+      objectType:    "0xdead0004::fake_foundation::FounderPass",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000004",
+      displayName:   "Sui Foundation VIP Founder Pass",
+      displayUrl:    "https://sui-f0undation.com/exclusive-nft",
+      moveAbi:       null,
+    },
+    // 5. NFT phishing — mint URL pattern
+    {
+      objectId:      syntheticObjectId(5),
+      objectType:    "0xdead0005::nft_phish::MintPass",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000005",
+      displayName:   "Sui Foundation Official NFT",
+      displayUrl:    "https://suifoundation-nft.io/mint",
+      moveAbi:       null,
+    },
+    // 6. Protocol impersonation — fake Cetus with untrusted package
+    {
+      objectId:      syntheticObjectId(6),
+      objectType:    "0xdead0006::fake_cetus::LPReceipt",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000006",
+      displayName:   "Cetus Protocol — Claim LP Rewards",
+      displayUrl:    "https://cetus-protocol.xyz/claim-rewards",
+      moveAbi:       null,
+    },
+    // 7. Approval phish — sweep_all in ABI + Cyrillic URL
+    {
+      objectId:      syntheticObjectId(7),
+      objectType:    "0xdead0007::approval_phish::ApprovalRequest",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000007",
+      displayName:   "Sui Wallet Verification Required",
+      displayUrl:    "https://verify-su\u0456wallet.com/approve",
+      moveAbi:       JSON.stringify({
+        functions: [
+          { name: "request_approval", visibility: "public",  params: ["address", "u64"] },
+          { name: "sweep_all",        visibility: "private", params: ["&mut 0x2::coin::Coin<0x2::sui::SUI>"] },
+        ],
+      }),
+    },
+    // 8. Dust attack — bulk sender, near-zero value coin
+    {
+      objectId:      syntheticObjectId(8),
+      objectType:    "0x2::coin::Coin<0x2::sui::SUI>",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000008",
+      displayName:   "0.000001 SUI Transfer",
+      displayUrl:    "",
+      moveAbi:       null,
+    },
+    // 9. Rug token — freeze_all + migrate_funds in ABI
+    {
+      objectId:      syntheticObjectId(9),
+      objectType:    "0xdead0009::rug_token::MemeCoin",
+      senderAddress: "0xbadc0ffee0000000000000000000000000000000000000000000000000000009",
+      displayName:   "SuiDoge — 100x Meme Coin",
+      displayUrl:    "https://suidoge-token.xyz/stake",
+      moveAbi:       JSON.stringify({
+        functions: [
+          { name: "buy",           visibility: "public",  params: ["address", "u64"] },
+          { name: "sell",          visibility: "public",  params: ["address", "u64"] },
+          { name: "freeze_all",    visibility: "private", params: [] },
+          { name: "migrate_funds", visibility: "private", params: ["address"] },
+        ],
+      }),
+    },
+    // 10. Fake governance — urgency language + digit-sub domain
+    {
+      objectId:      syntheticObjectId(10),
+      objectType:    "0xdead000a::fake_governance::VoteProposal",
+      senderAddress: "0xbadc0ffee000000000000000000000000000000000000000000000000000000a",
+      displayName:   "Sui DAO — Urgent Governance Vote (Expires Soon)",
+      displayUrl:    "https://sui-gov0rnance.io/vote",
+      moveAbi:       null,
+    },
+    // 11. Spoofed LP position — impersonates real Cetus package
+    {
+      objectId:      syntheticObjectId(11),
+      objectType:    "0xdead000b::spoofed_pool::Position",
+      senderAddress: "0xbadc0ffee000000000000000000000000000000000000000000000000000000b",
+      displayName:   "Cetus LP Position",
+      displayUrl:    "https://cetus.zone/position/fake",
+      moveAbi:       JSON.stringify({
+        functions: [
+          { name: "fake_mint",    visibility: "public", params: [] },
+          { name: "collect_fees", visibility: "public", params: ["&Position"] },
+        ],
+      }),
+    },
+    // 12. Bridge phishing — fake Wormhole with withdraw_all
+    {
+      objectId:      syntheticObjectId(12),
+      objectType:    "0xdead000c::fake_bridge::BridgeReceipt",
+      senderAddress: "0xbadc0ffee000000000000000000000000000000000000000000000000000000c",
+      displayName:   "Wormhole Bridge — Claim Bridged Tokens",
+      displayUrl:    "https://wormh0le-bridge.io/claim",
+      moveAbi:       JSON.stringify({
+        functions: [
+          { name: "claim",        visibility: "public",  params: ["address"] },
+          { name: "withdraw_all", visibility: "private", params: ["address"] },
+        ],
+      }),
+    },
+    // 13. Fake staking reward — Bluefin impersonation
+    {
+      objectId:      syntheticObjectId(13),
+      objectType:    "0xdead000d::fake_staking::RewardTicket",
+      senderAddress: "0xbadc0ffee000000000000000000000000000000000000000000000000000000d",
+      displayName:   "Bluefin Staking Reward — Claim Now",
+      displayUrl:    "https://bluefin-rewards.xyz/claim",
+      moveAbi:       null,
+    },
+    // 14. Multiple dust coins — same coin type, different objects (tests merge routing)
+    {
+      objectId:      syntheticObjectId(14),
+      objectType:    "0x2::coin::Coin<0x2::sui::SUI>",
+      senderAddress: "0xbadc0ffee000000000000000000000000000000000000000000000000000000e",
+      displayName:   "0.000002 SUI Transfer",
+      displayUrl:    "",
+      moveAbi:       null,
+    },
+    {
+      objectId:      syntheticObjectId(15),
+      objectType:    "0x2::coin::Coin<0x2::sui::SUI>",
+      senderAddress: "0xbadc0ffee000000000000000000000000000000000000000000000000000000f",
+      displayName:   "0.000003 SUI Transfer",
+      displayUrl:    "",
+      moveAbi:       null,
+    },
+    // 15. SAFE object — real Sui system coin (AI must not flag this)
+    {
+      objectId:      syntheticObjectId(16),
+      objectType:    "0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin<0x2::sui::SUI>",
+      senderAddress: targetAddress,
+      displayName:   "SUI",
+      displayUrl:    null,
+      moveAbi:       null,
+    },
+    // 16. SAFE object — real DeepBook order (AI must recognise trusted package)
+    {
+      objectId:      syntheticObjectId(17),
+      objectType:    "0x000000000000000000000000000000000000000000000000000000000000dee9::clob_v2::Order",
+      senderAddress: targetAddress,
+      displayName:   "DeepBook Order",
+      displayUrl:    null,
+      moveAbi:       null,
+    },
+  ];
+}
 
 // ─── Fetch real objects from the target wallet ───────────────────────────────
 
@@ -168,7 +321,7 @@ router.post("/populate-wallet", async (req, res) => {
 
   req.log.info(
     { targetAddress, realOnChain: REAL_ONCHAIN, onChainEnabled: isOnChainEnabled(), network: SUI_NETWORK },
-    "Populating wallet — fetching real wallet objects from chain"
+    "Populating wallet with synthetic fixtures + real wallet objects"
   );
 
   if (REAL_ONCHAIN && !isOnChainEnabled()) {
@@ -182,44 +335,40 @@ router.post("/populate-wallet", async (req, res) => {
   const networkName: NetworkName = SUI_NETWORK;
   const client = new SuiJsonRpcClient({ url: getJsonRpcFullnodeUrl(networkName), network: networkName });
 
-  // 1. Fetch REAL objects from the connected wallet
-  const realSpamObjects = await fetchRealSpamObjects(client, targetAddress);
+  // Build the full synthetic fixture set with targetAddress available
+  const syntheticFixtures: ChainObject[] = buildSyntheticFixtures(targetAddress);
+
+  // Fetch real wallet objects — append to synthetics so both are analyzed
+  const realObjects = await fetchRealSpamObjects(client, targetAddress);
+
+  // Deduplicate: if a real object has the same objectType as a synthetic one,
+  // prefer the synthetic object coverage unless a real object has the exact same objectId.
+  const realObjectIds = new Set(realObjects.map((o) => o.objectId));
+  const dedupedSynthetics = syntheticFixtures.filter((s) => !realObjectIds.has(s.objectId));
+
+  const injections: ChainObject[] = [...dedupedSynthetics, ...realObjects];
 
   req.log.info(
-    { count: realSpamObjects.length },
-    "Fetched real wallet objects from chain"
+    { synthetic: dedupedSynthetics.length, real: realObjects.length, total: injections.length },
+    "Populating wallet with full fixture set + real objects"
   );
 
-  if (realSpamObjects.length === 0) {
-    res.json({ injected: 0, quarantined: 0, threats: [] });
-    return;
-  }
-
-  const spamInjections: ChainObject[] = realSpamObjects;
-
-  // 3. Analyze wallet objects only
-  const injections: ChainObject[] = spamInjections;
-
-  // 4. Analyze ALL objects in a single model call
+  // Analyze ALL objects in a single model call
   const verdicts = await analyzeThreatBatch(injections);
 
-  const settled = await Promise.allSettled(
+  const threats = await Promise.all(
     injections.map(async (obj, idx) => {
       const verdict = verdicts[idx] ?? {
-        risk_score: 20, verdict: "SAFE" as const, reason_code: 5,
-        confidence: 0.5, flags: [], reasoning: "No verdict returned",
+        risk_score: 20,
+        verdict: "SAFE" as const,
+        reason_code: 5,
+        confidence: 0.5,
+        flags: [],
+        reasoning: "No verdict returned",
       };
 
-      // Deterministic safeguard for demo spam package objects:
-      // if an object belongs to the seeded spam package, force MALICIOUS
-      // so junk population is visible in the MALICIOUS-only UI.
-      const packageId = (obj.objectType.split("::")[0] ?? "").toLowerCase();
-      const spamPackageId = SPAM_PACKAGE_ID.toLowerCase();
-      const isNativeSuiCoin = obj.objectType.startsWith("0x2::coin::Coin<0x2::sui::SUI>");
-      const forceMalicious = packageId === spamPackageId && !isNativeSuiCoin;
-
-      const effectiveVerdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS" = forceMalicious ? "MALICIOUS" : verdict.verdict;
-      const effectiveRiskScore = forceMalicious ? Math.max(verdict.risk_score, 85) : verdict.risk_score;
+      const effectiveVerdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS" = verdict.verdict;
+      const effectiveRiskScore = verdict.risk_score;
 
       const logPayload = buildThreatLog({
         objectId:      obj.objectId,
@@ -235,12 +384,25 @@ router.post("/populate-wallet", async (req, res) => {
         reasoning:     verdict.reasoning,
       });
 
-      let threatId: number | null = null;
-      let onChainDigest: string | null = null;
+      try {
+        const existing = await prisma.threat.findFirst({
+          where: { objectId: obj.objectId, walletAddress: targetAddress },
+        });
 
-      // BUG FIX #1: Check verdict type AND high score threshold before quarantining
-      // Requires BOTH conditions: (1) explicitly MALICIOUS AND (2) score >= 75
-      if (effectiveVerdict === "MALICIOUS" && effectiveRiskScore >= 75) {
+        if (existing) {
+          return {
+            objectId:   obj.objectId,
+            objectType: obj.objectType,
+            verdict:    existing.verdict as "SAFE" | "SUSPICIOUS" | "MALICIOUS",
+            riskScore:  existing.riskScore,
+            threatId:   existing.status === "quarantined" ? existing.id : null,
+            onChainDigest: existing.quarantineTxDigest ?? null,
+          };
+        }
+
+        const shouldQuarantine = effectiveVerdict === "MALICIOUS" && effectiveRiskScore >= MIN_RISK_SCORE_FOR_QUARANTINE;
+        const status = shouldQuarantine ? "quarantined" : "safe";
+
         const [walrusBlobId, threat] = await Promise.all([
           storeThreatLog(logPayload),
           prisma.threat.create({
@@ -257,81 +419,61 @@ router.post("/populate-wallet", async (req, res) => {
               confidence:    verdict.confidence,
               flags:         verdict.flags,
               reasoning:     verdict.reasoning,
-              status:        "quarantined",
+              cleanMethod:   verdict.clean_method,
+              status,
             },
           }),
         ]);
 
-        threatId = threat.id;
+        const threatId = status === "quarantined" ? threat.id : null;
 
         if (walrusBlobId) {
-          await prisma.threat.update({ where: { id: threatId }, data: { walrusBlobId } });
+          await prisma.threat.update({ where: { id: threat.id }, data: { walrusBlobId } });
         }
 
-        onChainDigest = null;
-        if (REAL_ONCHAIN) {
+        let onChainDigest: string | null = null;
+        if (shouldQuarantine && REAL_ONCHAIN) {
           onChainDigest = await quarantineOnChain({
+            objectId:      obj.objectId,
+            objectType:    obj.objectType,
+            senderAddress: obj.senderAddress,
+            riskScore:     effectiveRiskScore,
+            verdict:       effectiveVerdict,
+            reasonCode:    verdict.reason_code,
+            confidence:    verdict.confidence,
+            walrusBlobId:  walrusBlobId ?? "",
+          });
+
+          if (onChainDigest) {
+            await prisma.threat.update({
+              where: { id: threat.id },
+              data:  { quarantineTxDigest: onChainDigest },
+            }).catch(() => {});
+          }
+        }
+
+        return {
           objectId:      obj.objectId,
           objectType:    obj.objectType,
-          senderAddress: obj.senderAddress,
-          riskScore:     effectiveRiskScore,
           verdict:       effectiveVerdict,
-          reasonCode:    verdict.reason_code,
-          confidence:    verdict.confidence,
-          walrusBlobId:  walrusBlobId ?? "",
-          });
-        }
-
-        if (onChainDigest) {
-          await prisma.threat.update({
-            where: { id: threatId },
-            data:  { quarantineTxDigest: onChainDigest },
-          }).catch(() => {});
-        }
-      } else {
-        const [walrusBlobId, threat] = await Promise.all([
-          storeThreatLog(logPayload),
-          prisma.threat.create({
-            data: {
-              objectId:      obj.objectId,
-              objectType:    obj.objectType,
-              senderAddress: obj.senderAddress,
-              walletAddress: targetAddress,
-              displayName:   obj.displayName ?? null,
-              displayUrl:    obj.displayUrl  ?? null,
-              riskScore:     effectiveRiskScore,
-              verdict:       effectiveVerdict,
-              reasonCode:    verdict.reason_code,
-              confidence:    verdict.confidence,
-              flags:         verdict.flags,
-              reasoning:     verdict.reasoning,
-              status:        "safe",
-            },
-          }),
-        ]);
-        if (walrusBlobId) {
-          await prisma.threat.update({ where: { id: threat.id }, data: { walrusBlobId } }).catch(() => {});
-        }
+          riskScore:     effectiveRiskScore,
+          threatId,
+          onChainDigest,
+        };
+      } catch (err) {
+        req.log.error({ err, objectId: obj.objectId, objectType: obj.objectType }, "populate-wallet item failed");
+        return {
+          objectId:      obj.objectId,
+          objectType:    obj.objectType,
+          verdict:       effectiveVerdict,
+          riskScore:     effectiveRiskScore,
+          threatId:      null,
+          onChainDigest: null,
+          error:         err instanceof Error ? err.message : String(err),
+        };
       }
-
-      return {
-        objectId:      obj.objectId,
-        objectType:    obj.objectType,
-        verdict:       effectiveVerdict,
-        riskScore:     effectiveRiskScore,
-        threatId,
-        onChainDigest,
-      };
     })
   );
-
-  const fulfilled = settled.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{
-    objectId: string; objectType: string;
-    verdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS";
-    riskScore: number; threatId: number | null; onChainDigest: string | null;
-  }>[];
-
-  const threats = fulfilled.map((r) => r.value);
 
   const quarantined    = threats.filter((t) => t.threatId !== null).length;
   const onChainDigests = threats.map((t) => t.onChainDigest).filter(Boolean);
