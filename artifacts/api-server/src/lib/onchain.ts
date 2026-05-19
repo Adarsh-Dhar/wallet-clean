@@ -467,3 +467,80 @@ export async function mergeDustOnChain(
     return null;
   }
 }
+
+/**
+ * Extract the QuarantinedAsset event ID from a quarantine transaction.
+ *
+ * After quarantineOnChain succeeds and returns a tx digest, this function
+ * queries the blockchain to find the emitted event and extract its ID for
+ * better traceability and on-chain linkage.
+ *
+ * Returns the event ID on success, null on failure or if event not found.
+ */
+export async function extractQuarantineEventId(
+  txDigest: string
+): Promise<string | null> {
+  if (!isOnChainEnabled()) return null;
+
+  try {
+    const client = getClient();
+    const tx = await client.getTransactionBlock({
+      digest: txDigest,
+      options: { showEvents: true },
+    });
+
+    // Find QuarantinedAsset event in tx.events
+    // The event type is: {PACKAGE_ID}::quarantine_vault::AssetQuarantined
+    if (!tx.events || tx.events.length === 0) {
+      logger.warn({ txDigest }, "No events found in quarantine transaction");
+      return null;
+    }
+
+    const event = tx.events.find((e) =>
+      e.type.includes("quarantine_vault") && e.type.includes("AssetQuarantined")
+    );
+
+    if (!event || !event.id?.txDigest) {
+      logger.warn({ txDigest }, "QuarantinedAsset event not found in transaction");
+      return null;
+    }
+
+    return event.id.txDigest;
+  } catch (err) {
+    logger.warn({ err, txDigest }, "extractQuarantineEventId failed (non-fatal)");
+    return null;
+  }
+}
+
+/**
+ * Validate that the DEAD_ADDRESS configured in .env matches the contract's expectation.
+ *
+ * The Move contract hardcodes 0x0 as the destination for destroyed objects.
+ * If DEAD_ADDRESS in .env doesn't match, objects won't actually be sent anywhere,
+ * and the transaction will fail. This check prevents silent failures at runtime.
+ *
+ * Returns { valid: true } if config is correct, or { valid: false, error: "..." } if mismatch.
+ */
+export async function validateDeadAddressConfig(): Promise<{ valid: boolean; error?: string }> {
+  if (!isOnChainEnabled()) {
+    return { valid: false, error: "On-chain not enabled (missing env vars)" };
+  }
+
+  try {
+    // The contract's hardcoded dead address is 0x0 (all zeros)
+    const contractDeadAddress = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    const envDeadAddress = (process.env["DEAD_ADDRESS"] || contractDeadAddress).toLowerCase();
+
+    if (envDeadAddress !== contractDeadAddress.toLowerCase()) {
+      return {
+        valid: false,
+        error: `Dead address mismatch: env=${envDeadAddress}, contract=${contractDeadAddress}`,
+      };
+    }
+
+    logger.info("Dead address validation passed");
+    return { valid: true };
+  } catch (err) {
+    return { valid: false, error: `Validation error: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}

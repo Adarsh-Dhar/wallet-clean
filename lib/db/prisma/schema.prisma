@@ -29,6 +29,9 @@ model Threat {
   walrusBlobId       String?   @map("walrus_blob_id")
   quarantineTxDigest String?   @map("quarantine_tx_digest")
   burnTxDigest       String?   @map("burn_tx_digest")
+  objectSource       String    @default("real") @map("object_source") // "real" | "synthetic" (legacy)
+  onChainEventId     String?   @map("on_chain_event_id") // Event ID from QuarantinedAsset event
+  releaseOnChainTxDigest String? @map("release_on_chain_tx_digest") // Track release transaction
   detectedAt         DateTime  @default(now()) @map("detected_at")
   updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
 
