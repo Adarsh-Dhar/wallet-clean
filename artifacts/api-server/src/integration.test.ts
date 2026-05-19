@@ -226,6 +226,19 @@ describe('GET /api/threats', () => {
     expect(Array.isArray(response.data)).toBe(true);
   });
 
+  it('should support filtering quarantined threats for a wallet', async () => {
+    const response = await makeRequest('GET', `/threats?status=quarantined&walletAddress=${encodeURIComponent(TEST_ADDRESS)}&limit=200`);
+
+    expect(response.status).toBe(200);
+    expect(Array.isArray(response.data)).toBe(true);
+    if (response.data.length > 0) {
+      response.data.forEach((threat: any) => {
+        expect(threat.status).toBe('quarantined');
+        expect(String(threat.walletAddress).toLowerCase()).toBe(TEST_ADDRESS.toLowerCase());
+      });
+    }
+  });
+
   it('should support filtering by verdict', async () => {
     const response = await makeRequest('GET', '/threats?verdict=MALICIOUS');
 

@@ -210,14 +210,25 @@ router.post("/populate-wallet", async (req, res) => {
         confidence: 0.5, flags: [], reasoning: "No verdict returned",
       };
 
+      // Deterministic safeguard for demo spam package objects:
+      // if an object belongs to the seeded spam package, force MALICIOUS
+      // so junk population is visible in the MALICIOUS-only UI.
+      const packageId = (obj.objectType.split("::")[0] ?? "").toLowerCase();
+      const spamPackageId = SPAM_PACKAGE_ID.toLowerCase();
+      const isNativeSuiCoin = obj.objectType.startsWith("0x2::coin::Coin<0x2::sui::SUI>");
+      const forceMalicious = packageId === spamPackageId && !isNativeSuiCoin;
+
+      const effectiveVerdict: "SAFE" | "SUSPICIOUS" | "MALICIOUS" = forceMalicious ? "MALICIOUS" : verdict.verdict;
+      const effectiveRiskScore = forceMalicious ? Math.max(verdict.risk_score, 85) : verdict.risk_score;
+
       const logPayload = buildThreatLog({
         objectId:      obj.objectId,
         objectType:    obj.objectType,
         senderAddress: obj.senderAddress,
         displayName:   obj.displayName ?? null,
         displayUrl:    obj.displayUrl  ?? null,
-        verdict:       verdict.verdict,
-        riskScore:     verdict.risk_score,
+        verdict:       effectiveVerdict,
+        riskScore:     effectiveRiskScore,
         reasonCode:    verdict.reason_code,
         confidence:    verdict.confidence,
         flags:         verdict.flags,
@@ -229,7 +240,7 @@ router.post("/populate-wallet", async (req, res) => {
 
       // BUG FIX #1: Check verdict type AND high score threshold before quarantining
       // Requires BOTH conditions: (1) explicitly MALICIOUS AND (2) score >= 75
-      if (verdict.verdict === "MALICIOUS" && verdict.risk_score >= 75) {
+      if (effectiveVerdict === "MALICIOUS" && effectiveRiskScore >= 75) {
         const [walrusBlobId, threat] = await Promise.all([
           storeThreatLog(logPayload),
           prisma.threat.create({
@@ -240,8 +251,8 @@ router.post("/populate-wallet", async (req, res) => {
               walletAddress: targetAddress,
               displayName:   obj.displayName ?? null,
               displayUrl:    obj.displayUrl  ?? null,
-              riskScore:     verdict.risk_score,
-              verdict:       verdict.verdict,
+              riskScore:     effectiveRiskScore,
+              verdict:       effectiveVerdict,
               reasonCode:    verdict.reason_code,
               confidence:    verdict.confidence,
               flags:         verdict.flags,
@@ -263,8 +274,8 @@ router.post("/populate-wallet", async (req, res) => {
           objectId:      obj.objectId,
           objectType:    obj.objectType,
           senderAddress: obj.senderAddress,
-          riskScore:     verdict.risk_score,
-          verdict:       verdict.verdict,
+          riskScore:     effectiveRiskScore,
+          verdict:       effectiveVerdict,
           reasonCode:    verdict.reason_code,
           confidence:    verdict.confidence,
           walrusBlobId:  walrusBlobId ?? "",
@@ -288,8 +299,8 @@ router.post("/populate-wallet", async (req, res) => {
               walletAddress: targetAddress,
               displayName:   obj.displayName ?? null,
               displayUrl:    obj.displayUrl  ?? null,
-              riskScore:     verdict.risk_score,
-              verdict:       verdict.verdict,
+              riskScore:     effectiveRiskScore,
+              verdict:       effectiveVerdict,
               reasonCode:    verdict.reason_code,
               confidence:    verdict.confidence,
               flags:         verdict.flags,
@@ -298,17 +309,16 @@ router.post("/populate-wallet", async (req, res) => {
             },
           }),
         ]);
-        threatId = threat.id;
         if (walrusBlobId) {
-          await prisma.threat.update({ where: { id: threatId }, data: { walrusBlobId } }).catch(() => {});
+          await prisma.threat.update({ where: { id: threat.id }, data: { walrusBlobId } }).catch(() => {});
         }
       }
 
       return {
         objectId:      obj.objectId,
         objectType:    obj.objectType,
-        verdict:       verdict.verdict as "SAFE" | "SUSPICIOUS" | "MALICIOUS",
-        riskScore:     verdict.risk_score,
+        verdict:       effectiveVerdict,
+        riskScore:     effectiveRiskScore,
         threatId,
         onChainDigest,
       };

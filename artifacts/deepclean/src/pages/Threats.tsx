@@ -1,26 +1,28 @@
 import { useState } from "react";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useListThreats, useReleaseThreat, useBurnThreat, getListThreatsQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Skeleton } from "@/components/ui/skeleton";
 import { VerdictBadge, StatusBadge, RiskBar } from "@/components/ThreatBadge";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { Unlock, Flame, ExternalLink } from "lucide-react";
+import { Unlock, Flame, ExternalLink, CheckCircle2, Zap } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { cn } from "@/lib/utils";
 
 export default function Threats() {
-  const [verdict, setVerdict] = useState<string>("all");
-  const [status, setStatus] = useState<string>("all");
+  const account = useCurrentAccount();
+  const walletAddress = account?.address;
   const [burningIds, setBurningIds] = useState<Set<number>>(new Set());
+  const [activeTab, setActiveTab] = useState<"quarantined" | "released" | "burned">("quarantined");
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
+  // Fetch all threats (not filtered by status) so we can show all lifecycle states
   const params = {
-    ...(verdict !== "all" ? { verdict: verdict as "SAFE" | "SUSPICIOUS" | "MALICIOUS" } : {}),
-    ...(status !== "all" ? { status: status as "quarantined" | "released" | "burned" } : {}),
-    limit: 50,
+    ...(walletAddress ? { walletAddress } : {}),
+    limit: 200,
   };
 
   const { data: threats, isLoading } = useListThreats(params, {
@@ -28,6 +30,17 @@ export default function Threats() {
   });
 
   const safeThreats = Array.isArray(threats) ? threats : [];
+  
+  // Group threats by status
+  const quarantinedThreats = safeThreats
+    .filter((t) => t.status === "quarantined")
+    .sort((a, b) => new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime());
+
+  const releasedThreats = safeThreats
+    .filter((t) => t.status === "released")
+    .sort((a, b) => new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime());
+
+  const visibleThreats = activeTab === "quarantined" ? quarantinedThreats : activeTab === "released" ? releasedThreats : safeThreats.filter((t) => t.status === "burned");
 
   const release = useReleaseThreat({
     mutation: {
@@ -54,6 +67,12 @@ export default function Threats() {
     },
   });
 
+  const tabs = [
+    { id: "quarantined" as const, label: "Active Malicious", icon: Zap, count: quarantinedThreats.length },
+    { id: "released" as const, label: "Released", icon: CheckCircle2, count: releasedThreats.length },
+    { id: "burned" as const, label: "Burned", icon: Flame, count: safeThreats.filter((t) => t.status === "burned").length },
+  ];
+
   return (
     <div className="p-6 space-y-5">
       <div>
@@ -61,46 +80,49 @@ export default function Threats() {
         <p className="text-sm text-muted-foreground mt-0.5">All detected assets analyzed by the AI agent</p>
       </div>
 
-      {/* Filters */}
-      <div className="flex items-center gap-3">
-        <Select value={verdict} onValueChange={setVerdict}>
-          <SelectTrigger className="w-40" data-testid="filter-verdict">
-            <SelectValue placeholder="All verdicts" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All verdicts</SelectItem>
-            <SelectItem value="MALICIOUS">Malicious</SelectItem>
-            <SelectItem value="SUSPICIOUS">Suspicious</SelectItem>
-            <SelectItem value="SAFE">Safe</SelectItem>
-          </SelectContent>
-        </Select>
-        <Select value={status} onValueChange={setStatus}>
-          <SelectTrigger className="w-40" data-testid="filter-status">
-            <SelectValue placeholder="All statuses" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All statuses</SelectItem>
-            <SelectItem value="quarantined">Quarantined</SelectItem>
-            <SelectItem value="released">Released</SelectItem>
-            <SelectItem value="burned">Burned</SelectItem>
-          </SelectContent>
-        </Select>
-        {(verdict !== "all" || status !== "all") && (
-          <Button variant="ghost" size="sm" onClick={() => { setVerdict("all"); setStatus("all"); }}>
-            Clear filters
-          </Button>
+      {/* Tab Navigation */}
+      <div className="border-b border-border">
+        <div className="flex items-center gap-1">
+          {tabs.map(({ id, label, icon: Icon, count }) => (
+            <button
+              key={id}
+              onClick={() => setActiveTab(id)}
+              className={cn(
+                "flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-0.5",
+                activeTab === id
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              )}
+              data-testid={`tab-${id}`}
+            >
+              <Icon className="w-4 h-4" />
+              <span>{label}</span>
+              {count > 0 && (
+                <span className={cn(
+                  "ml-1 px-2 py-0.5 rounded text-xs font-semibold",
+                  activeTab === id
+                    ? "bg-primary/20 text-primary"
+                    : "bg-muted text-muted-foreground"
+                )}>
+                  {count}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Help text */}
+      <div className="text-sm text-muted-foreground">
+        {!walletAddress ? (
+          <span>Connect your wallet to view threat detections.</span>
+        ) : activeTab === "quarantined" ? (
+          <span>Active malicious threats detected in your wallet — release or burn to resolve.</span>
+        ) : activeTab === "released" ? (
+          <span>Assets you've released back to their original status.</span>
+        ) : (
+          <span>Permanently destroyed malicious objects — cannot be recovered.</span>
         )}
-        <Button
-          size="sm"
-          variant="destructive"
-          className="ml-auto gap-2"
-          disabled
-          title="Deep clean all is disabled. Clean from a connected wallet row in Wallets."
-          data-testid="button-clean-all"
-        >
-          <Flame className="w-4 h-4" />
-          Deep Clean All (Disabled)
-        </Button>
       </div>
 
       {/* Table */}
@@ -126,8 +148,8 @@ export default function Threats() {
                   ))}
                 </tr>
               ))
-            ) : safeThreats.length > 0 ? (
-              safeThreats.map((t) => (
+            ) : visibleThreats.length > 0 ? (
+              visibleThreats.map((t) => (
                 <tr
                   key={t.id}
                   data-testid={`row-threat-${t.id}`}
@@ -181,23 +203,15 @@ export default function Threats() {
                         </Button>
                       </div>
                     )}
-                    {t.status === "burned" && t.burnTxDigest && (
-                      <a
-                        href={`https://suiscan.xyz/testnet/tx/${t.burnTxDigest}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs text-red-400 hover:underline flex items-center gap-1"
-                      >
-                        View burn tx <ExternalLink className="w-3 h-3" />
-                      </a>
-                    )}
                   </td>
                 </tr>
               ))
             ) : (
               <tr>
                 <td colSpan={7} className="px-4 py-12 text-center text-muted-foreground text-sm">
-                  No threats found. The agent is monitoring your wallets.
+                  {activeTab === "quarantined" && "No active malicious threats found for this wallet."}
+                  {activeTab === "released" && "No released threats found for this wallet."}
+                  {activeTab === "burned" && "No permanently destroyed threats found for this wallet."}
                 </td>
               </tr>
             )}

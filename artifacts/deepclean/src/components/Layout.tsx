@@ -25,43 +25,27 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [hasEthereum, setHasEthereum] = useState(false);
   const [hasSolana, setHasSolana] = useState(false);
 
-  const { data: threats } = useListThreats({ status: "quarantined", limit: 100 });
-  const quarantinedCount = Array.isArray(threats) ? threats.length : 0;
+  const walletAddress = account?.address;
+  const badgeParams = {
+    status: "quarantined" as const,
+    ...(walletAddress ? { walletAddress } : {}),
+    limit: 200,
+  };
+  const { data: threats } = useListThreats(badgeParams);
+  const activeThreatCount = walletAddress
+    ? (Array.isArray(threats)
+        ? threats
+            .filter((t) => t.status !== "burned")
+            .sort((a, b) => new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime())
+            .filter((t, index, arr) => arr.findIndex((x) => x.objectId === t.objectId) === index).length
+        : 0)
+    : 0;
 
-  useEffect(() => {
-    setHasEthereum(typeof (window as any).ethereum !== "undefined");
-    setHasSolana(typeof (window as any).solana !== "undefined" && (window as any).solana.isPhantom);
-  }, []);
+  // useEffect(() => {
+  //   setHasEthereum(typeof (window as any).ethereum !== "undefined");
+  //   setHasSolana(typeof (window as any).solana !== "undefined" && (window as any).solana.isPhantom);
+  // }, []);
 
-  async function connectMetaMask() {
-    try {
-      const ethereum = (window as any).ethereum;
-      if (!ethereum) throw new Error("MetaMask not found");
-      const accounts: string[] = await ethereum.request({ method: "eth_requestAccounts" });
-      const address = accounts[0];
-      // persist for other UI pieces to consume
-      try { localStorage.setItem("externalWallet", JSON.stringify({ provider: "metamask", address })); } catch (e) {}
-      window.dispatchEvent(new CustomEvent("externalWallet:connected", { detail: { provider: "metamask", address } }));
-      toast({ title: "MetaMask connected", description: address });
-    } catch (err: any) {
-      toast({ title: "MetaMask connect failed", description: String(err), variant: "destructive" });
-    }
-  }
-
-  async function connectPhantom() {
-    try {
-      const solana = (window as any).solana;
-      if (!solana || !solana.isPhantom) throw new Error("Phantom wallet not found");
-      const resp = await solana.connect();
-      const pubkey = resp?.publicKey?.toString?.() ?? resp?.publicKey ?? String(resp);
-      const address = pubkey;
-      try { localStorage.setItem("externalWallet", JSON.stringify({ provider: "phantom", address })); } catch (e) {}
-      window.dispatchEvent(new CustomEvent("externalWallet:connected", { detail: { provider: "phantom", address } }));
-      toast({ title: "Phantom connected", description: address });
-    } catch (err: any) {
-      toast({ title: "Phantom connect failed", description: String(err), variant: "destructive" });
-    }
-  }
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
@@ -96,9 +80,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               >
                 <Icon className="w-4 h-4 shrink-0" />
                 {label}
-                 {label === "Threats" && quarantinedCount > 0 ? (
-                   <span className="ml-auto min-w-[18px] h-[18px] rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center px-1">
-                     {quarantinedCount > 99 ? "99+" : quarantinedCount}
+                 {label === "Threats" && activeThreatCount > 0 ? (
+                   <span className="ml-auto min-w-4.5 h-4.5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center px-1">
+                     {activeThreatCount > 99 ? "99+" : activeThreatCount}
                    </span>
                  ) : active && label !== "Threats" ? (
                    <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
@@ -114,99 +98,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <div className="flex justify-center">
             <ConnectButton />
           </div>
-
-          <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground space-y-1">
-            <div className="flex items-center gap-2">
-              <Lock className="w-3 h-3" />
-              <span className="uppercase tracking-[0.22em] text-[10px]">Session</span>
-              <span className="ml-auto text-[10px] text-foreground">
-                {auth.status === "authenticated"
-                  ? "Unlocked"
-                  : auth.status === "signing"
-                    ? "Signing"
-                    : auth.status === "checking"
-                      ? "Checking"
-                      : "Locked"}
-              </span>
-            </div>
-            <div className="truncate">
-              {auth.walletAddress ? auth.walletAddress : "Connect a wallet to unlock the console"}
-            </div>
-          </div>
-
-          {auth.isAuthenticated ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="w-full gap-2"
-              onClick={() => {
-                void auth.signOut();
-                toast({ title: "Signed out", description: "Your session token was cleared." });
-              }}
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              Sign out
-            </Button>
-          ) : auth.status === "needs-sign-in" || auth.status === "signing" || auth.status === "checking" ? (
-            <Button
-              type="button"
-              size="sm"
-              className="w-full gap-2"
-              onClick={() => {
-                void auth.signIn().catch((err) => {
-                  toast({ title: "Sign in failed", description: String(err), variant: "destructive" });
-                });
-              }}
-              disabled={auth.status !== "needs-sign-in"}
-            >
-              {auth.status === "signing" || auth.status === "checking" ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Sparkles className="w-3.5 h-3.5" />
-              )}
-              {auth.status === "signing"
-                ? "Waiting for signature"
-                : auth.status === "checking"
-                  ? "Verifying session"
-                  : "Sign in with wallet"}
-            </Button>
-          ) : null}
-
-          {/* Quick-connect for other injected wallets (MetaMask / Phantom) */}
-          <div className="flex justify-center gap-2 mt-2">
-            {hasEthereum && (
-              <button
-                className="text-xs px-2 py-1 rounded-md bg-zinc-800 text-white"
-                onClick={connectMetaMask}
-                title="Connect MetaMask (EVM)"
-              >
-                MetaMask
-              </button>
-            )}
-            {hasSolana && (
-              <button
-                className="text-xs px-2 py-1 rounded-md bg-purple-700 text-white"
-                onClick={connectPhantom}
-                title="Connect Phantom (Solana)"
-              >
-                Phantom
-              </button>
-            )}
-            {!hasEthereum && !hasSolana && (
-              <div className="text-xs text-muted-foreground">No injected wallets detected</div>
-            )}
-          </div>
-
-          {/* Connected Address Display */}
-          {account && (
-            <div className="rounded px-2 py-1.5 bg-primary/10 border border-primary/20">
-              <div className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Connected</div>
-              <div className="font-mono text-[10px] text-primary truncate" title={account.address}>
-                {account.address.slice(0, 10)}...{account.address.slice(-6)}
-              </div>
-            </div>
-          )}
 
           {/* Agent Status */}
           <div className="flex items-center gap-2">

@@ -51,6 +51,8 @@ export interface Threat {
   walrusBlobId?: string | null;
   /** @nullable */
   quarantineTxDigest?: string | null;
+  /** @nullable */
+  burnTxDigest?: string | null;
   detectedAt: string;
   updatedAt?: string;
 }

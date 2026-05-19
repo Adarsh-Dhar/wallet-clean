@@ -363,6 +363,8 @@ components:
           type: ["string", "null"]
         quarantineTxDigest:
           type: ["string", "null"]
+        burnTxDigest:
+          type: ["string", "null"]
         detectedAt:
           type: string
         updatedAt:

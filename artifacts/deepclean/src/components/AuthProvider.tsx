@@ -29,35 +29,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     const currentAddress = account?.address ?? null;
-    setWalletAddress(currentAddress);
+    const storedToken = getStoredAuthToken();
 
-    if (!currentAddress) {
-      setStoredAuthToken(null);
+    // If there's no connected wallet and no stored token → locked
+    if (!currentAddress && !storedToken) {
+      setWalletAddress(null);
       setError(null);
       setStatus("locked");
       return;
     }
 
-    if (!getStoredAuthToken()) {
-      setError(null);
-      setStatus("needs-sign-in");
-      return;
+    // If we have a stored token, try to restore the session from the server
+    if (storedToken) {
+      setStatus("checking");
+      try {
+        const session = await fetchAuthSession();
+        setWalletAddress(session.address);
+
+        // If a wallet is connected ensure it matches the restored session
+        if (currentAddress && session.address.toLowerCase() !== currentAddress.toLowerCase()) {
+          setStoredAuthToken(null);
+          setError(null);
+          setStatus("needs-sign-in");
+          return;
+        }
+
+        setError(null);
+        setStatus("authenticated");
+        return;
+      } catch {
+        // Token invalid or expired — clear and continue to determine next state
+        setStoredAuthToken(null);
+        setError(null);
+      }
     }
 
-    setStatus("checking");
-
-    try {
-      const session = await fetchAuthSession();
-      if (session.address.toLowerCase() !== currentAddress.toLowerCase()) {
-        throw new Error("Wallet changed");
-      }
-
-      setError(null);
-      setStatus("authenticated");
-    } catch {
-      setStoredAuthToken(null);
-      setError(null);
+    // No valid stored token at this point. If wallet connected, require sign-in.
+    setWalletAddress(currentAddress);
+    if (currentAddress) {
       setStatus("needs-sign-in");
+    } else {
+      setStatus("locked");
     }
   }, [account?.address]);
 
