@@ -162,6 +162,7 @@ router.post("/threats/analyze", async (req, res) => {
             senderAddress: input.senderAddress,
             displayName:   input.displayName ?? null,
             displayUrl:    input.displayUrl   ?? null,
+            walletAddress: input.walletAddress ?? null,
             riskScore:     verdict.risk_score,
             verdict:       verdict.verdict,
             reasonCode:    verdict.reason_code,

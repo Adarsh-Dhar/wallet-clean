@@ -61,7 +61,8 @@ export const AnalyzeThreatBody = zod.object({
   "senderAddress": zod.string(),
   "displayName": zod.string().nullish(),
   "displayUrl": zod.string().nullish(),
-  "moveAbi": zod.string().nullish()
+  "moveAbi": zod.string().nullish(),
+  "walletAddress": zod.string().optional()
 })
 
 export const AnalyzeThreatResponse = zod.object({

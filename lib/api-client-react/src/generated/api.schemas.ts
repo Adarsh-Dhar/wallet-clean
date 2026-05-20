@@ -67,6 +67,8 @@ export interface ThreatAnalysisInput {
   displayUrl?: string | null;
   /** @nullable */
   moveAbi?: string | null;
+  /** @nullable */
+  walletAddress?: string | null;
 }
 
 export type ThreatAnalysisResultVerdict = typeof ThreatAnalysisResultVerdict[keyof typeof ThreatAnalysisResultVerdict];

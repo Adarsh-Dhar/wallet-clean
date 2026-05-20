@@ -5,6 +5,9 @@ import { Transaction } from "@mysten/sui/transactions";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { logger } from "../lib/logger";
+import { analyzeThreatBatch } from "../lib/gemini";
+import { storeThreatLog, buildThreatLog } from "../lib/walrus";
+import { prisma } from "@workspace/db";
 
 const router = Router();
 
@@ -183,7 +186,7 @@ async function seedOnChainJunk(
       }
     }
 
-    async function mintAirdropToken(): Promise<string> {
+    async function mintAirdropToken(): Promise<{ digest: string; created: string[] }> {
       const tx = new Transaction();
       tx.setSender(agentAddress);
 
@@ -203,19 +206,23 @@ async function seedOnChainJunk(
         throw new Error("Mint did not create expected AirdropToken — see server logs for effects");
       }
 
-      return res.digest;
+      return { digest: res.digest, created };
     }
 
-    async function mintRugToken(): Promise<string> {
+    async function mintRugToken(): Promise<{ digest: string; created: string[] }> {
       const tx = new Transaction();
       tx.moveCall({
         target: `${spamPackageId}::rug_token::airdrop_to`,
         arguments: [tx.pure.address(targetAddress)],
       });
-      return executeAndWait(tx);
+      const res = await executeAndGetResult(tx);
+      const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
+      const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
+      const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
+      return { digest: res.digest, created };
     }
 
-    async function mintFakeFoundationNft(): Promise<string> {
+    async function mintFakeFoundationNft(): Promise<{ digest: string; created: string[] }> {
       const tx = new Transaction();
       tx.setSender(agentAddress);
 
@@ -234,10 +241,10 @@ async function seedOnChainJunk(
         throw new Error("Mint did not create expected FounderPass — see server logs for effects");
       }
 
-      return res.digest;
+      return { digest: res.digest, created: createdNft };
     }
 
-    async function mintSpoofedPool(): Promise<string> {
+    async function mintSpoofedPool(): Promise<{ digest: string; created: string[] }> {
       const tx = new Transaction();
       tx.setSender(agentAddress);
 
@@ -256,10 +263,10 @@ async function seedOnChainJunk(
         throw new Error("Mint did not create expected Position — see server logs for effects");
       }
 
-      return res.digest;
+      return { digest: res.digest, created: createdPool };
     }
 
-    async function mintHoneypotToken(): Promise<string> {
+    async function mintHoneypotToken(): Promise<{ digest: string; created: string[] }> {
       const tx = new Transaction();
       tx.setSender(agentAddress);
 
@@ -278,10 +285,10 @@ async function seedOnChainJunk(
         throw new Error("Mint did not create expected HoneypotToken — see server logs for effects");
       }
 
-      return res.digest;
+      return { digest: res.digest, created: createdHoney };
     }
 
-    const jobs: Array<{ key: string; label: string; fn: () => Promise<string> }> = [
+    const jobs: Array<{ key: string; label: string; fn: () => Promise<{ digest: string; created: string[] }> }> = [
       { key: "airdrop", label: "Fake SUI Airdrop Token", fn: mintAirdropToken },
       { key: "rug", label: "Rug Meme Coin", fn: mintRugToken },
       { key: "nft", label: "Fake Foundation NFT", fn: mintFakeFoundationNft },
@@ -291,28 +298,46 @@ async function seedOnChainJunk(
 
     for (const job of jobs) {
       try {
-        const digest = await job.fn();
+        const out = await job.fn();
+        const digest = out?.digest ?? (out as any);
+        const createdIds: string[] = Array.isArray(out?.created) && out!.created.length > 0 ? out!.created : [];
         logger.info({ digest, job: job.key, network }, `Seeded ${job.label} successfully`);
         result.seeded++;
         result.digests.push(digest);
 
         // Keep a record of the intended object type for downstream UI/logging.
-        result.objects.push({
-          objectId: `${job.key}:${digest}`,
-          objectType: job.key === "airdrop"
-            ? `${spamPackageId}::malicious_airdrop::AirdropToken`
-            : job.key === "rug"
-              ? `${spamPackageId}::rug_token::MemeCoin`
-              : job.key === "nft"
-                ? `${spamPackageId}::fake_foundation_nft::FounderPass`
-                : job.key === "pool"
-                  ? `${spamPackageId}::pool::Position`
-                  : `${spamPackageId}::honeypot_defi::HoneypotToken`,
-          senderAddress: agentAddress,
-          displayName: job.label,
-          displayUrl: null,
-          moveAbi: null,
-        });
+        const objectType = job.key === "airdrop"
+          ? `${spamPackageId}::malicious_airdrop::AirdropToken`
+          : job.key === "rug"
+            ? `${spamPackageId}::rug_token::MemeCoin`
+            : job.key === "nft"
+              ? `${spamPackageId}::fake_foundation_nft::FounderPass`
+              : job.key === "pool"
+                ? `${spamPackageId}::pool::Position`
+                : `${spamPackageId}::honeypot_defi::HoneypotToken`;
+
+        if (createdIds.length > 0) {
+          for (const objId of createdIds) {
+            result.objects.push({
+              objectId: objId,
+              objectType,
+              senderAddress: agentAddress,
+              displayName: job.label,
+              displayUrl: null,
+              moveAbi: null,
+            });
+          }
+        } else {
+          // Fallback to legacy placeholder if we couldn't extract created IDs
+          result.objects.push({
+            objectId: `${job.key}:${digest}`,
+            objectType,
+            senderAddress: agentAddress,
+            displayName: job.label,
+            displayUrl: null,
+            moveAbi: null,
+          });
+        }
       } catch (jobErr) {
         logger.warn({ err: jobErr, job: job.key }, `Exception seeding ${job.label}`);
       }
@@ -391,12 +416,81 @@ router.post("/populate-wallet", async (req, res) => {
     "Populating wallet with on-chain junk objects only"
   );
 
+  // If we seeded objects, run them through the AI analyser so the UI shows
+  // quarantined threats immediately and links them to the target wallet.
+  const threatsOut: Array<{ objectId: string; objectType: string; verdict: string; riskScore: number; threatId?: number | null }> = [];
+
+  if (seedResult.objects.length > 0) {
+    try {
+      const inputs = seedResult.objects.map((o) => ({
+        objectId: o.objectId,
+        objectType: o.objectType,
+        senderAddress: o.senderAddress,
+        displayName: o.displayName,
+        displayUrl: o.displayUrl,
+        moveAbi: o.moveAbi,
+      }));
+
+      const results = await analyzeThreatBatch(inputs as any);
+
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        const src = seedResult.objects[i];
+        if (r.verdict === "MALICIOUS" && r.risk_score >= 75) {
+          const logPayload = buildThreatLog({
+            objectId: src.objectId,
+            objectType: src.objectType,
+            senderAddress: src.senderAddress,
+            displayName: src.displayName,
+            displayUrl: src.displayUrl,
+            verdict: r.verdict,
+            riskScore: r.risk_score,
+            reasonCode: r.reason_code,
+            confidence: r.confidence,
+            flags: r.flags,
+            reasoning: r.reasoning,
+          });
+
+          const walrusBlobId = await storeThreatLog(logPayload).catch(() => null);
+
+          const inserted = await prisma.threat.create({
+            data: {
+              objectId: src.objectId,
+              objectType: src.objectType,
+              senderAddress: src.senderAddress,
+              walletAddress: targetAddress,
+              displayName: src.displayName ?? null,
+              displayUrl: src.displayUrl ?? null,
+              riskScore: r.risk_score,
+              verdict: r.verdict,
+              reasonCode: r.reason_code,
+              confidence: r.confidence,
+              flags: r.flags,
+              reasoning: r.reasoning,
+              cleanMethod: r.clean_method,
+              hasStoreAbility: false,
+              status: "quarantined",
+              walrusBlobId: walrusBlobId ?? null,
+            },
+          });
+
+          threatsOut.push({ objectId: src.objectId, objectType: src.objectType, verdict: r.verdict, riskScore: r.risk_score, threatId: inserted.id });
+        } else {
+          threatsOut.push({ objectId: src.objectId, objectType: src.objectType, verdict: r.verdict, riskScore: r.risk_score, threatId: null });
+        }
+      }
+    } catch (err) {
+      req.log.warn({ err }, "Analysis of seeded objects failed — returning seed result without DB threats");
+    }
+  }
+
   res.json({
     injected: seedResult.seeded,
     digests: seedResult.digests,
     objects: seedResult.objects,
     targetAddress,
     network: SUI_NETWORK,
+    threats: threatsOut,
   });
 });
 

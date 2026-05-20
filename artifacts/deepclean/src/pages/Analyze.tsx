@@ -3,6 +3,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useAnalyzeThreat } from "@workspace/api-client-react";
 import { useState } from "react";
 import { useLocation } from "wouter";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -52,6 +53,7 @@ export default function Analyze() {
     savedThreatId?: number | null;
   } | null>(null);
   const [, setLocation] = useLocation();
+  const account = useCurrentAccount();
 
   const form = useForm<ThreatAnalysisFormValues>({
     resolver: zodResolver(threatAnalysisSchema),
@@ -86,6 +88,7 @@ export default function Analyze() {
         displayName: values.displayName || null,
         displayUrl: values.displayUrl || null,
         moveAbi: values.moveAbi || null,
+        walletAddress: account?.address ?? null,
       },
     });
   }
