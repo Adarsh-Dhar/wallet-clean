@@ -3,7 +3,7 @@ import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-ki
 import { Transaction } from "@mysten/sui/transactions";
 import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { getGetDashboardStatsQueryKey, getListThreatsQueryKey, getListWatchedWalletsQueryKey } from "@workspace/api-client-react";
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, ExternalLink, Loader2, Shield, Wallet, X, XCircle, Zap } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, ExternalLink, Loader2, Shield, Sparkles, Wallet, X, XCircle, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiJson } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
@@ -43,6 +43,27 @@ interface PopulateResult {
 interface CleanResult {
   cleaned: number;
   threats: Array<{ id: number; objectId: string; burnTxDigest: string | null }>;
+}
+
+interface ScanSummary {
+  total: number;
+  analyzed: number;
+  quarantined: number;
+  safe: number;
+}
+
+interface ScanEvent {
+  step?: string;
+  message: string;
+  status?: "running" | "done" | "error";
+  objectId?: string;
+  objectType?: string;
+  threatId?: number;
+  riskScore?: number;
+  verdict?: string;
+  count?: number;
+  onChainDigest?: string | null;
+  error?: string;
 }
 
 interface QuarantinedThreat {
@@ -88,6 +109,103 @@ async function cleanWalletApi(threatIds: number[], burnTxDigest: string): Promis
     method: "POST",
     body: { threatIds, burnTxDigest },
   });
+}
+
+async function scanWalletStream(
+  walletAddress: string,
+  onEvent: (event: ScanEvent) => void,
+): Promise<ScanSummary> {
+  const response = await fetch("/api/scan-wallet", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ walletAddress }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "Scan failed");
+    throw new Error(errorText || `Scan failed with status ${response.status}`);
+  }
+
+  if (!response.body) {
+    throw new Error("Scan response stream is unavailable");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let currentEvent = "message";
+  let dataLines: string[] = [];
+  let summary: ScanSummary = { total: 0, analyzed: 0, quarantined: 0, safe: 0 };
+
+  const dispatch = () => {
+    if (dataLines.length === 0) return;
+    const raw = dataLines.join("\n");
+    dataLines = [];
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+
+    if (currentEvent === "done") {
+      summary = {
+        total: Number(parsed?.total ?? 0),
+        analyzed: Number(parsed?.analyzed ?? 0),
+        quarantined: Number(parsed?.quarantined ?? 0),
+        safe: Number(parsed?.safe ?? 0),
+      };
+      onEvent({ message: "Scan complete", status: "done", ...summary });
+      return;
+    }
+
+    if (currentEvent === "error") {
+      onEvent({ message: String(parsed?.message ?? "Scan failed"), status: "error" });
+      return;
+    }
+
+    onEvent(parsed as ScanEvent);
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line) {
+        dispatch();
+        currentEvent = "message";
+        continue;
+      }
+
+      if (line.startsWith("event: ")) {
+        currentEvent = line.slice(7).trim();
+        continue;
+      }
+
+      if (line.startsWith("data: ")) {
+        dataLines.push(line.slice(6));
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    for (const line of buffer.split(/\r?\n/)) {
+      if (line.startsWith("event: ")) {
+        currentEvent = line.slice(7).trim();
+      } else if (line.startsWith("data: ")) {
+        dataLines.push(line.slice(6));
+      }
+    }
+    dispatch();
+  }
+
+  return summary;
 }
 
 function LogPanel({
@@ -160,19 +278,59 @@ export default function Wallets() {
   const walletKey = walletAddress ?? "connected-wallet";
 
   const [populating, setPopulating] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [cleaning, setCleaning] = useState(false);
   const [populateLogs, setPopulateLogs] = useState<Record<string, LogEntry[]>>({});
+  const [scanLogs, setScanLogs] = useState<Record<string, LogEntry[]>>({});
   const [cleanLogs, setCleanLogs] = useState<Record<string, LogEntry[]>>({});
   const [openPopulateLog, setOpenPopulateLog] = useState<string | null>(null);
+  const [openScanLog, setOpenScanLog] = useState<string | null>(null);
   const [openCleanLog, setOpenCleanLog] = useState<string | null>(null);
   const [cleanedState, setCleanedState] = useState<Record<string, { count: number; digest: string } | null>>({});
+  const [scanState, setScanState] = useState<Record<string, ScanSummary | null>>({});
 
   function appendPopulateLog(key: string, entry: LogEntry) {
     setPopulateLogs((current) => ({ ...current, [key]: [...(current[key] ?? []), entry] }));
   }
 
+  function appendScanLog(key: string, entry: LogEntry) {
+    setScanLogs((current) => ({ ...current, [key]: [...(current[key] ?? []), entry] }));
+  }
+
   function appendCleanLog(key: string, entry: LogEntry) {
     setCleanLogs((current) => ({ ...current, [key]: [...(current[key] ?? []), entry] }));
+  }
+
+  async function performWalletScan(key: string, address: string): Promise<ScanSummary> {
+    appendScanLog(key, mkLog("info", "Starting full wallet scan…"));
+    appendScanLog(key, mkLog("info", `Target: ${address}`));
+
+    const summary = await scanWalletStream(address, (event) => {
+      if (event.status === "error") {
+        appendScanLog(key, mkLog("error", event.message));
+        return;
+      }
+
+      if (event.status === "running") {
+        appendScanLog(key, mkLog("info", event.message, event.objectId));
+        return;
+      }
+
+      const detail = event.objectId ?? event.objectType ?? undefined;
+      const level: LogLevel = event.step === "quarantine" ? "success" : event.step === "analyze" && event.verdict === "MALICIOUS" ? "warn" : "info";
+      appendScanLog(key, mkLog(level, event.message, detail));
+    });
+
+    appendScanLog(
+      key,
+      mkLog(
+        "success",
+        `✓ Scan complete — ${summary.quarantined} quarantined, ${summary.safe} safe`,
+        `analyzed ${summary.analyzed} of ${summary.total} owned object(s)`,
+      ),
+    );
+
+    return summary;
   }
 
   async function performDeepClean(key: string, address: string): Promise<{ cleaned: number; digest: string } | false | true> {
@@ -446,6 +604,34 @@ export default function Wallets() {
     }
   }
 
+  async function handleScan() {
+    if (!walletAddress) return;
+
+    const key = walletAddress;
+    setOpenScanLog(key);
+    setScanLogs((current) => ({ ...current, [key]: [] }));
+    setScanning(true);
+    appendScanLog(key, mkLog("info", `Target: ${walletAddress}`));
+
+    try {
+      const summary = await performWalletScan(key, walletAddress);
+      setScanState((current) => ({ ...current, [key]: summary }));
+      queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getListWatchedWalletsQueryKey() });
+      toast({
+        title: "Scan finished",
+        description: `${summary.quarantined} quarantined, ${summary.safe} safe`,
+      });
+    } catch (error) {
+      appendScanLog(key, mkLog("error", "Wallet scan failed"));
+      appendScanLog(key, mkLog("error", String(error)));
+      toast({ title: "Scan failed", description: String(error), variant: "destructive" });
+    } finally {
+      setScanning(false);
+    }
+  }
+
   return (
     <div className="p-6 space-y-6 max-w-3xl">
       <div>
@@ -503,7 +689,7 @@ export default function Wallets() {
               size="sm"
               className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-cyan-400 hover:bg-cyan-500/10 shrink-0"
               onClick={() => populate.mutate({ address: walletAddress })}
-              disabled={populating || cleaning}
+              disabled={populating || scanning || cleaning}
               title="Scan wallet objects for threats"
               data-testid="button-seed-wallet-connected"
             >
@@ -523,9 +709,31 @@ export default function Wallets() {
             <Button
               variant="ghost"
               size="sm"
+              className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-violet-400 hover:bg-violet-500/10 shrink-0"
+              onClick={handleScan}
+              disabled={populating || scanning || cleaning}
+              title="Scan all owned objects and quarantine new threats"
+              data-testid="button-scan-wallet-connected"
+            >
+              {scanning ? (
+                <>
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span className="hidden sm:inline">Scanning…</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3 h-3" />
+                  <span className="hidden sm:inline">Scan</span>
+                </>
+              )}
+            </Button>
+
+            <Button
+              variant="ghost"
+              size="sm"
               className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-rose-400 hover:bg-rose-500/10 shrink-0"
               onClick={handleClean}
-              disabled={populating || cleaning}
+              disabled={populating || scanning || cleaning}
               title="Clean quarantined threats"
               data-testid="button-clean-wallet-connected"
             >
@@ -547,8 +755,18 @@ export default function Wallets() {
             <LogPanel logs={populateLogs[walletKey]} title="Populate — Connected wallet" onClose={() => setOpenPopulateLog(null)} />
           )}
 
+          {openScanLog === walletKey && scanLogs[walletKey] && (
+            <LogPanel logs={scanLogs[walletKey]} title="Scan — Connected wallet" onClose={() => setOpenScanLog(null)} />
+          )}
+
           {openCleanLog === walletKey && cleanLogs[walletKey] && (
             <LogPanel logs={cleanLogs[walletKey]} title="Clean — Connected wallet" onClose={() => setOpenCleanLog(null)} />
+          )}
+
+          {scanState[walletKey] && (
+            <div className="text-xs text-muted-foreground">
+              Last scan: {scanState[walletKey]!.quarantined} quarantined, {scanState[walletKey]!.safe} safe, {scanState[walletKey]!.analyzed} analyzed.
+            </div>
           )}
         </div>
       )}

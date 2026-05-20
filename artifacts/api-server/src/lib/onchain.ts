@@ -112,6 +112,7 @@ export async function fetchCoinObjectsForWallet(
   }
 }
 
+
 /**
  * Extract the inner coin type T from a full Coin<T> object type string.
  * e.g. "0x2::coin::Coin<0xspam::rug_token::MemeCoin>" -> "0xspam::rug_token::MemeCoin"
@@ -602,58 +603,73 @@ export async function extractQuarantineEventId(
       options: { showEvents: true },
     });
 
-    // Find QuarantinedAsset event in tx.events
-    // The event type is: {PACKAGE_ID}::quarantine_vault::AssetQuarantined
-    if (!tx.events || tx.events.length === 0) {
-      logger.warn({ txDigest }, "No events found in quarantine transaction");
+    const events = tx.events ?? [];
+    const quarantineEvent = events.find((event: any) => {
+      const type = String(event?.type ?? event?.parsedJson?.type ?? "");
+      return type.includes("QuarantinedAsset") || type.includes("quarantine_vault::QuarantinedAsset");
+    });
+
+    if (!quarantineEvent) {
       return null;
     }
 
-    const event = tx.events.find((e) =>
-      e.type.includes("quarantine_vault") && e.type.includes("AssetQuarantined")
-    );
-
-    if (!event || !event.id?.txDigest) {
-      logger.warn({ txDigest }, "QuarantinedAsset event not found in transaction");
-      return null;
-    }
-
-    return event.id.txDigest;
+    const parsed = (quarantineEvent as any).parsedJson ?? quarantineEvent;
+    const eventId = parsed?.event_id ?? parsed?.id ?? parsed?.eventId ?? parsed?.object_id ?? null;
+    return typeof eventId === "string" ? eventId : null;
   } catch (err) {
-    logger.warn({ err, txDigest }, "extractQuarantineEventId failed (non-fatal)");
+    logger.warn({ err, txDigest }, "extractQuarantineEventId failed");
     return null;
   }
 }
 
+export interface WalletOwnedObject {
+  objectId: string;
+  objectType: string;
+  displayName: string | null;
+  displayUrl: string | null;
+  moveAbi: string | null;
+}
+
 /**
- * Validate that the DEAD_ADDRESS configured in .env matches the contract's expectation.
- *
- * The Move contract hardcodes 0x0 as the destination for destroyed objects.
- * If DEAD_ADDRESS in .env doesn't match, objects won't actually be sent anywhere,
- * and the transaction will fail. This check prevents silent failures at runtime.
- *
- * Returns { valid: true } if config is correct, or { valid: false, error: "..." } if mismatch.
+ * Fetch all owned objects for a wallet across every RPC page.
  */
-export async function validateDeadAddressConfig(): Promise<{ valid: boolean; error?: string }> {
-  if (!isOnChainEnabled()) {
-    return { valid: false, error: "On-chain not enabled (missing env vars)" };
-  }
+export async function fetchAllWalletObjects(walletAddress: string): Promise<WalletOwnedObject[]> {
+  const client = getClient();
+  const objects: WalletOwnedObject[] = [];
+  let cursor: string | null = null;
+  let hasNextPage = true;
 
-  try {
-    // The contract's hardcoded dead address is 0x0 (all zeros)
-    const contractDeadAddress = "0x0000000000000000000000000000000000000000000000000000000000000000";
-    const envDeadAddress = (process.env["DEAD_ADDRESS"] || contractDeadAddress).toLowerCase();
+  while (hasNextPage) {
+    const page = await client.getOwnedObjects({
+      owner: walletAddress,
+      cursor,
+      limit: 50,
+      options: {
+        showType: true,
+        showDisplay: true,
+        showContent: false,
+      },
+    });
 
-    if (envDeadAddress !== contractDeadAddress.toLowerCase()) {
-      return {
-        valid: false,
-        error: `Dead address mismatch: env=${envDeadAddress}, contract=${contractDeadAddress}`,
-      };
+    for (const item of page.data ?? []) {
+      const obj = item.data as any;
+      const objectId = obj?.objectId ?? obj?.object_id;
+      const objectType = obj?.type ?? obj?.objectType;
+      if (!objectId || !objectType) continue;
+
+      const displayData = obj?.display?.data ?? obj?.display ?? null;
+      objects.push({
+        objectId,
+        objectType,
+        displayName: displayData?.name ?? null,
+        displayUrl: displayData?.link ?? displayData?.url ?? null,
+        moveAbi: null,
+      });
     }
 
-    logger.info("Dead address validation passed");
-    return { valid: true };
-  } catch (err) {
-    return { valid: false, error: `Validation error: ${err instanceof Error ? err.message : String(err)}` };
+    cursor = page.nextCursor ?? null;
+    hasNextPage = Boolean(page.hasNextPage && cursor);
   }
+
+  return objects;
 }

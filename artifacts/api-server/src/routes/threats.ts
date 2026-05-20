@@ -16,6 +16,7 @@ import {
   isOnChainEnabled,
   sendToDeadOnChain,
   mergeDustOnChain,
+  fetchAllWalletObjects,
   getSuiRpcUrl,
 } from "../lib/onchain";
 import { MIN_RISK_SCORE_FOR_QUARANTINE } from "../lib/constants";
@@ -550,6 +551,180 @@ router.post("/clean-wallet", async (req, res) => {
       burnTxDigest: digest,
     })),
   });
+});
+
+// POST /scan-wallet — full wallet scan with SSE progress updates
+router.post("/scan-wallet", async (req, res) => {
+  const body = req.body as { walletAddress?: string };
+  const walletAddress = body?.walletAddress?.trim();
+  if (!walletAddress) {
+    res.status(400).json({ error: "walletAddress is required" });
+    return;
+  }
+
+  const authAddress = res.locals.authSession?.address as string | undefined;
+  if (authAddress && authAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+    res.status(403).json({ error: "Access denied: wallet mismatch" });
+    return;
+  }
+
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  (res as any).flushHeaders?.();
+
+  const emit = (event: string, data: Record<string, unknown>) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const emitLog = (
+    step: string,
+    message: string,
+    extra: Record<string, unknown> = {},
+    status: "running" | "done" | "error" = "done",
+  ) => {
+    emit("log", { step, message, status, ...extra });
+  };
+
+  try {
+    emitLog("fetch", "Fetching all owned objects…", {}, "running");
+    const objects = await fetchAllWalletObjects(walletAddress);
+    emitLog("fetch", `Found ${objects.length} owned object(s)`, { count: objects.length });
+
+    const existing = await prisma.threat.findMany({
+      where: {
+        walletAddress: { equals: walletAddress, mode: "insensitive" },
+      },
+      select: { objectId: true },
+    });
+    const existingObjectIds = new Set(existing.map((row) => row.objectId));
+    const toAnalyze = objects.filter((object) => !existingObjectIds.has(object.objectId));
+
+    emitLog(
+      "filter",
+      `${toAnalyze.length} new object(s) to analyze (${existingObjectIds.size} already recorded)`,
+      { count: toAnalyze.length },
+    );
+
+    let quarantined = 0;
+    let safe = 0;
+
+    for (const object of toAnalyze) {
+      emitLog(
+        "analyze",
+        `Analyzing ${object.objectType}`,
+        { objectId: object.objectId, objectType: object.objectType },
+        "running",
+      );
+
+      try {
+        const verdict = await analyzeThreat({
+          objectId: object.objectId,
+          objectType: object.objectType,
+          senderAddress: walletAddress,
+          displayName: object.displayName,
+          displayUrl: object.displayUrl,
+          moveAbi: object.moveAbi,
+        });
+
+        if (verdict.verdict === "MALICIOUS" && verdict.risk_score >= MIN_RISK_SCORE_FOR_QUARANTINE) {
+          const logPayload = buildThreatLog({
+            objectId: object.objectId,
+            objectType: object.objectType,
+            senderAddress: walletAddress,
+            displayName: object.displayName,
+            displayUrl: object.displayUrl,
+            verdict: verdict.verdict,
+            riskScore: verdict.risk_score,
+            reasonCode: verdict.reason_code,
+            confidence: verdict.confidence,
+            flags: verdict.flags,
+            reasoning: verdict.reasoning,
+          });
+
+          const walrusBlobId = await storeThreatLog(logPayload).catch(() => null);
+          const threat = await prisma.threat.create({
+            data: {
+              objectId: object.objectId,
+              objectType: object.objectType,
+              senderAddress: walletAddress,
+              walletAddress,
+              displayName: object.displayName ?? null,
+              displayUrl: object.displayUrl ?? null,
+              riskScore: verdict.risk_score,
+              verdict: verdict.verdict,
+              reasonCode: verdict.reason_code,
+              confidence: verdict.confidence,
+              flags: verdict.flags,
+              reasoning: verdict.reasoning,
+              cleanMethod: verdict.clean_method,
+              hasStoreAbility: false,
+              status: "quarantined",
+              walrusBlobId: walrusBlobId ?? null,
+            },
+          });
+
+          let onChainDigest: string | null = null;
+          if (isOnChainEnabled()) {
+            onChainDigest = await quarantineOnChain({
+              objectId: object.objectId,
+              objectType: object.objectType,
+              senderAddress: walletAddress,
+              riskScore: verdict.risk_score,
+              verdict: verdict.verdict,
+              reasonCode: verdict.reason_code,
+              confidence: verdict.confidence,
+              walrusBlobId: walrusBlobId ?? "",
+            }).catch(() => null);
+
+            if (onChainDigest) {
+              await prisma.threat.update({
+                where: { id: threat.id },
+                data: { quarantineTxDigest: onChainDigest },
+              }).catch(() => {});
+            }
+          }
+
+          quarantined += 1;
+          emitLog(
+            "quarantine",
+            `Quarantined ${object.objectType}`,
+            { objectId: object.objectId, threatId: threat.id, onChainDigest, riskScore: verdict.risk_score, verdict: verdict.verdict },
+          );
+        } else {
+          safe += 1;
+          emitLog(
+            "analyze",
+            `Safe ${object.objectType}`,
+            { objectId: object.objectId, riskScore: verdict.risk_score, verdict: verdict.verdict },
+          );
+        }
+      } catch (error) {
+        emitLog(
+          "analyze",
+          `Failed to analyze ${object.objectType}`,
+          { objectId: object.objectId, error: error instanceof Error ? error.message : String(error) },
+          "error",
+        );
+      }
+    }
+
+    emit("done", {
+      total: objects.length,
+      analyzed: toAnalyze.length,
+      quarantined,
+      safe,
+    });
+  } catch (error) {
+    emit("error", {
+      message: error instanceof Error ? error.message : "Wallet scan failed",
+    });
+  } finally {
+    res.end();
+  }
 });
 
 export default router;
