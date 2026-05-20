@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { walletSchema, type WalletFormValues } from "@/lib/schemas";
-import { Trash2, Plus, Wallet, AlertTriangle, Zap, PlugZap } from "lucide-react";
+import { Trash2, Plus, Wallet, AlertTriangle, Zap, PlugZap, Sparkles, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface PopulateResult {
@@ -36,6 +36,30 @@ interface PopulateResult {
   }>;
 }
 
+interface ScanSummary {
+  total: number;
+  analyzed: number;
+  quarantined: number;
+  safe: number;
+}
+
+interface ScanEvent {
+  step?: string;
+  message: string;
+  status?: "running" | "done" | "error";
+  objectId?: string;
+  objectType?: string;
+  threatId?: number;
+  riskScore?: number;
+  verdict?: string;
+  count?: number;
+  onChainDigest?: string | null;
+  error?: string;
+  total?: number;
+  analyzed?: number;
+  quarantined?: number;
+  safe?: number;
+}
 async function populateWalletApi(targetAddress: string): Promise<PopulateResult> {
   const res = await fetch("/api/populate-wallet", {
     method: "POST",
@@ -46,10 +70,110 @@ async function populateWalletApi(targetAddress: string): Promise<PopulateResult>
   return res.json() as Promise<PopulateResult>;
 }
 
+async function scanWalletStream(
+  walletAddress: string,
+  onEvent: (event: ScanEvent) => void,
+): Promise<ScanSummary> {
+  const response = await fetch("/api/scan-wallet", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ walletAddress }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "Scan failed");
+    throw new Error(errorText || `Scan failed with status ${response.status}`);
+  }
+
+  if (!response.body) {
+    throw new Error("Scan response stream is unavailable");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let currentEvent = "message";
+  let dataLines: string[] = [];
+  let summary: ScanSummary = { total: 0, analyzed: 0, quarantined: 0, safe: 0 };
+
+  const dispatch = () => {
+    if (dataLines.length === 0) return;
+    const raw = dataLines.join("\n");
+    dataLines = [];
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+
+    if (currentEvent === "done") {
+      summary = {
+        total: Number(parsed?.total ?? 0),
+        analyzed: Number(parsed?.analyzed ?? 0),
+        quarantined: Number(parsed?.quarantined ?? 0),
+        safe: Number(parsed?.safe ?? 0),
+      };
+      onEvent({ message: "Scan complete", status: "done", ...summary });
+      return;
+    }
+
+    if (currentEvent === "error") {
+      onEvent({ message: String(parsed?.message ?? "Scan failed"), status: "error" });
+      return;
+    }
+
+    onEvent(parsed as ScanEvent);
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line) {
+        dispatch();
+        currentEvent = "message";
+        continue;
+      }
+
+      if (line.startsWith("event: ")) {
+        currentEvent = line.slice(7).trim();
+        continue;
+      }
+
+      if (line.startsWith("data: ")) {
+        dataLines.push(line.slice(6));
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    for (const line of buffer.split(/\r?\n/)) {
+      if (line.startsWith("event: ")) {
+        currentEvent = line.slice(7).trim();
+      } else if (line.startsWith("data: ")) {
+        dataLines.push(line.slice(6));
+      }
+    }
+    dispatch();
+  }
+
+  return summary;
+}
 export default function Wallets() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [populatingId, setPopulatingId] = useState<number | null>(null);
+  const [scanningId, setScanningId] = useState<number | null>(null);
+  const [scanLogs, setScanLogs] = useState<Record<number, string[]>>({});
+  const [scanSummary, setScanSummary] = useState<Record<number, ScanSummary | null>>({});
+  const [openScanLog, setOpenScanLog] = useState<number | null>(null);
 
   // Get the currently connected Sui wallet
   const account = useCurrentAccount();
@@ -157,6 +281,61 @@ export default function Wallets() {
     },
   });
 
+  const scan = useMutation({
+    mutationFn: ({ address, walletId }: { address: string; walletId: number }) =>
+      scanWalletStream(address, (event) => {
+        setScanLogs((current) => ({
+          ...current,
+          [walletId]: [
+            ...(current[walletId] ?? []),
+            event.status === "error"
+              ? `✗ ${event.message}`
+              : event.status === "running"
+                ? `⟳ ${event.message}`
+                : event.step === "quarantine"
+                  ? `✓ ${event.message}`
+                  : `• ${event.message}`,
+          ],
+        }));
+
+        if (event.status === "done") {
+          setScanSummary((current) => ({
+            ...current,
+            [walletId]: {
+              total: event.total ?? 0,
+              analyzed: event.analyzed ?? 0,
+              quarantined: event.quarantined ?? 0,
+              safe: event.safe ?? 0,
+            },
+          }));
+        }
+      }),
+    onMutate: ({ walletId, address }) => {
+      setScanningId(walletId);
+      setOpenScanLog(walletId);
+      setScanLogs((current) => ({
+        ...current,
+        [walletId]: [`Starting full wallet scan…`, `Target: ${address}`],
+      }));
+      setScanSummary((current) => ({ ...current, [walletId]: null }));
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getListWatchedWalletsQueryKey() });
+    },
+    onSettled: () => {
+      setScanningId(null);
+    },
+    onError: (error) => {
+      toast({
+        title: "Scan failed",
+        description: String(error),
+        variant: "destructive",
+      });
+    },
+  });
+
   function onSubmit(values: WalletFormValues) {
     add.mutate({ data: { address: values.address, label: values.label } });
   }
@@ -257,7 +436,7 @@ export default function Wallets() {
             <div
               key={wallet.id}
               data-testid={`card-wallet-${wallet.id}`}
-              className="rounded-lg border border-border bg-card p-4 flex items-center gap-4"
+              className="rounded-lg border border-border bg-card p-4 flex flex-wrap items-center gap-4"
             >
               <div className="flex items-center justify-center w-9 h-9 rounded-md bg-violet-500/20 border border-violet-500/20 shrink-0">
                 <Wallet className="w-4 h-4 text-violet-400" />
@@ -293,28 +472,51 @@ export default function Wallets() {
                 </div>
               </div>
 
-              {/* Populate wallet button */}
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-cyan-400 hover:bg-cyan-500/10 shrink-0"
-                onClick={() => populate.mutate({ address: wallet.address })}
-                disabled={populate.isPending}
-                title="Scan wallet objects for threats"
-                data-testid={`button-seed-wallet-${wallet.id}`}
-              >
-                {populatingId === wallet.id ? (
-                  <>
-                    <span className="w-3 h-3 border border-cyan-400 border-t-transparent rounded-full animate-spin" />
-                    <span className="hidden sm:inline">Seeding…</span>
-                  </>
-                ) : (
-                  <>
-                    <Zap className="w-3 h-3" />
-                    <span className="hidden sm:inline">Populate</span>
-                  </>
-                )}
-              </Button>
+              <div className="flex items-center gap-2 shrink-0">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-violet-400 hover:bg-violet-500/10 shrink-0"
+                  onClick={() => scan.mutate({ address: wallet.address, walletId: wallet.id })}
+                  disabled={scan.isPending}
+                  title="Scan all owned objects and quarantine new threats"
+                  data-testid={`button-scan-wallet-${wallet.id}`}
+                >
+                  {scanningId === wallet.id ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span className="hidden sm:inline">Scanning…</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3 h-3" />
+                      <span className="hidden sm:inline">Scan</span>
+                    </>
+                  )}
+                </Button>
+
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-cyan-400 hover:bg-cyan-500/10 shrink-0"
+                  onClick={() => populate.mutate({ address: wallet.address })}
+                  disabled={populate.isPending || scan.isPending}
+                  title="Scan wallet objects for threats"
+                  data-testid={`button-seed-wallet-${wallet.id}`}
+                >
+                  {populatingId === wallet.id ? (
+                    <>
+                      <span className="w-3 h-3 border border-cyan-400 border-t-transparent rounded-full animate-spin" />
+                      <span className="hidden sm:inline">Seeding…</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-3 h-3" />
+                      <span className="hidden sm:inline">Populate</span>
+                    </>
+                  )}
+                </Button>
+              </div>
 
               {/* Remove button */}
               <Button
@@ -327,6 +529,38 @@ export default function Wallets() {
               >
                 <Trash2 className="w-4 h-4" />
               </Button>
+
+              {openScanLog === wallet.id && (
+                <div className="basis-full rounded-lg border border-border bg-background/50 p-3 text-xs font-mono space-y-1">
+                  <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <span>Scan Log</span>
+                    <button
+                      type="button"
+                      className="text-muted-foreground hover:text-foreground"
+                      onClick={() => setOpenScanLog(null)}
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  {(scanLogs[wallet.id]?.length ?? 0) > 0 ? (
+                    <div className="space-y-1">
+                      {scanLogs[wallet.id]!.map((line, index) => (
+                        <div key={index} className="wrap-break-word text-muted-foreground">
+                          {line}
+                        </div>
+                      ))}
+                      {scanSummary[wallet.id] && (
+                        <div className="pt-1 text-zinc-400">
+                          {scanSummary[wallet.id]!.quarantined} quarantined, {scanSummary[wallet.id]!.safe} safe, {scanSummary[wallet.id]!.analyzed} analyzed.
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-muted-foreground">Waiting for scan output…</div>
+                  )}
+                </div>
+              )}
             </div>
           ))
         ) : (

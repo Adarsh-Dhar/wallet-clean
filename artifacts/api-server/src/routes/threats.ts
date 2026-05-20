@@ -153,7 +153,10 @@ router.post("/threats/analyze", async (req, res) => {
     // BUG FIX #1: Check verdict type AND high score threshold before quarantining
     // Requires BOTH conditions: (1) explicitly MALICIOUS AND (2) score >= 75
     // Prevents false positives where SAFE objects might have borderline scores
-    if (verdict.verdict === "MALICIOUS" && verdict.risk_score >= 75) {
+    if (
+      (verdict.verdict === "MALICIOUS" || verdict.verdict === "SUSPICIOUS") &&
+      verdict.risk_score >= 75
+    ) {
       const [walrusBlobId, threat] = await Promise.all([
         storeThreatLog(logPayload),
         prisma.threat.create({
@@ -630,7 +633,10 @@ router.post("/scan-wallet", async (req, res) => {
           moveAbi: object.moveAbi,
         });
 
-        if (verdict.verdict === "MALICIOUS" && verdict.risk_score >= MIN_RISK_SCORE_FOR_QUARANTINE) {
+        if (
+          (verdict.verdict === "MALICIOUS" || verdict.verdict === "SUSPICIOUS") &&
+          verdict.risk_score >= MIN_RISK_SCORE_FOR_QUARANTINE
+        ) {
           const logPayload = buildThreatLog({
             objectId: object.objectId,
             objectType: object.objectType,
