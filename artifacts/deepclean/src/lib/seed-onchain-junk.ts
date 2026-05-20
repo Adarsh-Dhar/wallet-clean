@@ -15,7 +15,7 @@
  *     --key suiprivkeyAGENT_PRIVATE_KEY \
  *     --package 0xSPAM_PACKAGE_ID \
  *     [--network testnet|devnet|mainnet] \
- *     [--types airdrop,rug,nft,pool,honeypot]  (default: all)
+ *     [--types airdrop,rug,nft,pool,honeypot,staking,counterfeit,flash_loan,escrow,swap,governance,bridge,subscription]  (default: all)
  *
  * Or set env vars and omit flags:
  *   TARGET_ADDRESS   AGENT_PRIVATE_KEY   SPAM_PACKAGE_ID   SUI_NETWORK
@@ -26,7 +26,7 @@
 
 import "dotenv/config";
 // Use dynamic imports to avoid type conflicts across different @mysten/sui versions
-const { SuiJsonRpcClient, getJsonRpcFullnodeUrl } = await import("@mysten/sui/jsonRpc");
+const { SuiClient, getFullnodeUrl } = await import("@mysten/sui/client");
 const { Transaction } = await import("@mysten/sui/transactions");
 const { Ed25519Keypair } = await import("@mysten/sui/keypairs/ed25519");
 const { decodeSuiPrivateKey } = await import("@mysten/sui/cryptography");
@@ -50,9 +50,29 @@ const NETWORK = (
 ) as "testnet" | "devnet" | "mainnet" | "localnet";
 
 const TYPES_ARG = getArg("--types");
+const LIST_TYPES_ONLY = args.includes("--list-types");
+
+const SUPPORTED_TYPES = [
+  "airdrop",
+  "rug",
+  "nft",
+  "pool",
+  "honeypot",
+  "staking",
+  "counterfeit",
+  "flash_loan",
+  "escrow",
+  "swap",
+  "governance",
+  "bridge",
+  "subscription",
+] as const;
+
+type SupportedType = (typeof SUPPORTED_TYPES)[number];
+
 const REQUESTED_TYPES = TYPES_ARG
-  ? new Set(TYPES_ARG.split(",").map((s) => s.trim()))
-  : new Set(["airdrop", "rug", "nft", "pool", "honeypot"]);
+  ? new Set(TYPES_ARG.split(",").map((s) => s.trim()).filter(Boolean))
+  : new Set<string>(SUPPORTED_TYPES);
 
 // ─── Colours ─────────────────────────────────────────────────────────────────
 
@@ -70,10 +90,15 @@ const C = {
 
 function fatal(msg: string): never {
   console.error(`${C.red}${C.bold}ERROR:${C.reset} ${msg}`);
-  console.error(
-    `\nUsage:\n  tsx seed-onchain-junk.ts \\\n    --address 0xTARGET \\\n    --key suiprivkey... \\\n    --package 0xSPAM_PKG \\\n    [--network testnet] \\\n    [--types airdrop,rug,nft,pool,honeypot]`
+    console.error(
+      `\nUsage:\n  tsx seed-onchain-junk.ts \\\n    --address 0xTARGET \\\n    --key suiprivkey... \\\n    --package 0xSPAM_PKG \\\n    [--network testnet] \\\n    [--types airdrop,rug,nft,pool,honeypot,staking,counterfeit,flash_loan,escrow,swap,governance,bridge,subscription]`
   );
   process.exit(1);
+}
+
+if (LIST_TYPES_ONLY) {
+  console.log(SUPPORTED_TYPES.join(","));
+  process.exit(0);
 }
 
 if (!TARGET_ADDRESS) fatal("--address (or TARGET_ADDRESS env) is required");
@@ -99,10 +124,7 @@ const agentAddress = keypair.toSuiAddress();
 
 // ─── Sui client ───────────────────────────────────────────────────────────────
 
-const client = new SuiJsonRpcClient({
-  url: getJsonRpcFullnodeUrl(NETWORK),
-  network: NETWORK,
-});
+const client = new SuiClient({ url: getFullnodeUrl(NETWORK) });
 
 // ─── PTB helpers ─────────────────────────────────────────────────────────────
 
@@ -209,6 +231,124 @@ async function mintHoneypotToken(target: string): Promise<string> {
   return executeAndWait(tx);
 }
 
+/**
+ * fake_staking::mint(recipient, ctx) → StakingReceipt
+ */
+async function mintFakeStaking(target: string): Promise<string> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${PACKAGE_ID}::fake_staking::mint`,
+    arguments: [tx.pure.address(target)],
+  });
+
+  return executeAndWait(tx);
+}
+
+/**
+ * fake_staking::mint_with_amount(recipient, amount, ctx)
+ * Optional: create a staking receipt with a custom amount
+ */
+async function mintFakeStakingWithAmount(target: string, amount: bigint = 1000000n): Promise<string> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${PACKAGE_ID}::fake_staking::mint_with_amount`,
+    arguments: [tx.pure.address(target), tx.pure.u64(amount)],
+  });
+
+  return executeAndWait(tx);
+}
+
+/**
+ * counterfeit_nft::mint(recipient, ctx) → CounterfeitCollectable
+ */
+async function mintCounterfeitNft(target: string): Promise<string> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${PACKAGE_ID}::counterfeit_nft::mint`,
+    arguments: [tx.pure.address(target)],
+  });
+
+  return executeAndWait(tx);
+}
+
+/**
+ * flash_loan_faker::mint(recipient, ctx) → FlashLoanTicket
+ */
+async function mintFlashLoanTicket(target: string): Promise<string> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${PACKAGE_ID}::flash_loan_faker::mint`,
+    arguments: [tx.pure.address(target)],
+  });
+
+  return executeAndWait(tx);
+}
+
+/**
+ * marketplace_escrow::mint(recipient, ctx) → EscrowTicket
+ */
+async function mintMarketplaceEscrow(target: string): Promise<string> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${PACKAGE_ID}::marketplace_escrow::mint`,
+    arguments: [tx.pure.address(target)],
+  });
+
+  return executeAndWait(tx);
+}
+
+/**
+ * swap_tracker::mint(recipient, ctx) → SwapReceipt
+ */
+async function mintSwapReceipt(target: string): Promise<string> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${PACKAGE_ID}::swap_tracker::mint`,
+    arguments: [tx.pure.address(target)],
+  });
+
+  return executeAndWait(tx);
+}
+
+/**
+ * fake_governance::mint(recipient, ctx) → GovernanceToken
+ */
+async function mintFakeGovernanceToken(target: string): Promise<string> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${PACKAGE_ID}::fake_governance::mint`,
+    arguments: [tx.pure.address(target)],
+  });
+
+  return executeAndWait(tx);
+}
+
+/**
+ * bridge_faker::mint(recipient, ctx) → BridgeNotification
+ */
+async function mintBridgeNotification(target: string): Promise<string> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${PACKAGE_ID}::bridge_faker::mint`,
+    arguments: [tx.pure.address(target)],
+  });
+
+  return executeAndWait(tx);
+}
+
+/**
+ * subscription_token::mint(recipient, ctx) → SubscriptionToken
+ */
+async function mintSubscriptionToken(target: string): Promise<string> {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${PACKAGE_ID}::subscription_token::mint`,
+    arguments: [tx.pure.address(target)],
+  });
+
+  return executeAndWait(tx);
+}
+
 // ─── Job table ────────────────────────────────────────────────────────────────
 
 interface JunkJob {
@@ -243,6 +383,46 @@ const ALL_JOBS: JunkJob[] = [
     label: "Honeypot DeFi Token       (honeypot_defi::HoneypotToken)",
     fn:    mintHoneypotToken,
   },
+  {
+    key:   "staking",
+    label: "Fake Staking Receipt      (fake_staking::StakingReceipt)",
+    fn:    mintFakeStaking,
+  },
+  {
+    key:   "counterfeit",
+    label: "Counterfeit NFT           (counterfeit_nft::CounterfeitCollectable)",
+    fn:    mintCounterfeitNft,
+  },
+  {
+    key:   "flash_loan",
+    label: "Flash Loan Ticket         (flash_loan_faker::FlashLoanTicket)",
+    fn:    mintFlashLoanTicket,
+  },
+  {
+    key:   "escrow",
+    label: "Marketplace Escrow Ticket (marketplace_escrow::EscrowTicket)",
+    fn:    mintMarketplaceEscrow,
+  },
+  {
+    key:   "swap",
+    label: "Malicious Swap Receipt    (swap_tracker::SwapReceipt)",
+    fn:    mintSwapReceipt,
+  },
+  {
+    key:   "governance",
+    label: "Suspicious Governance Tok (fake_governance::GovernanceToken)",
+    fn:    mintFakeGovernanceToken,
+  },
+  {
+    key:   "bridge",
+    label: "Bridge Notification       (bridge_faker::BridgeNotification)",
+    fn:    mintBridgeNotification,
+  },
+  {
+    key:   "subscription",
+    label: "Subscription Token       (subscription_token::SubscriptionToken)",
+    fn:    mintSubscriptionToken,
+  },
 ];
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -264,9 +444,16 @@ async function main() {
   console.log(`  Target wallet : ${C.cyan}${TARGET_ADDRESS}${C.reset}`);
   console.log(`  Types         : ${C.dim}${[...REQUESTED_TYPES].join(", ")}${C.reset}\n`);
 
+  const unknownTypes = [...REQUESTED_TYPES].filter(
+    (type) => !SUPPORTED_TYPES.includes(type as SupportedType)
+  );
+  if (unknownTypes.length > 0) {
+    fatal(`Unknown type(s): ${unknownTypes.join(", ")}. Valid: ${SUPPORTED_TYPES.join(", ")}`);
+  }
+
   const jobs = ALL_JOBS.filter((j) => REQUESTED_TYPES.has(j.key));
   if (jobs.length === 0) {
-    fatal(`No valid types in --types. Valid: airdrop, rug, nft, pool, honeypot`);
+    fatal(`No valid types in --types. Valid: ${SUPPORTED_TYPES.join(", ")}`);
   }
 
   // Check agent has gas before starting

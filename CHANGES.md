@@ -1,5 +1,12 @@
 # DeepClean Feature Implementation — Complete Changelog
 
+## 2026-05-20 — Junk Type Expansion
+
+- Added the current junk-type coverage set for DeepClean, including `airdrop`, `rug`, `nft`, `pool`, `honeypot`, `staking`, `counterfeit`, `flash_loan`, `escrow`, `swap`, `governance`, `bridge`, and `subscription`.
+- Updated the DeepClean seeder so the runtime package ID can mint all supported junk types on testnet.
+- Verified the Move package builds successfully after the junk-type additions.
+- Seeded the live testnet wallet with the new staking object to confirm end-to-end coverage.
+
 This document describes the **two features** and **all code changes** needed for:
 1. **Wallet Connection Integration** — users can connect a Sui wallet to auto-populate the address
 2. **On-Chain Quarantine Recording** — threat quarantines are recorded immutably on-chain via Move contract

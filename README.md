@@ -22,47 +22,7 @@ sui client publish --network testnet
 ```
 
 ### Configure Environment
-```bash
-# Copy env vars from deployment output
-export QUARANTINE_PACKAGE_ID=0x...
-export QUARANTINE_ADMIN_CAP_ID=0x...
-export AGENT_PRIVATE_KEY=suiprivkey1...
-export SUI_NETWORK=testnet
-export DATABASE_URL=postgres://...
-```
-
-### Apply Database Migration
-```bash
-cd lib/db
-npx prisma migrate deploy
-```
-
-### Start API
-```bash
-cd artifacts/api-server
-npm install && npm run dev
-# API listens on port 8080
-```
-
-### Test Threat Analysis
-```bash
-curl -X POST http://localhost:8080/api/threats/populate-wallet \
-  -H "Content-Type: application/json" \
-  -d '{
-    "targetAddress": "0x<wallet_address>"
-  }'
-```
-
----
-
-## Documentation
-
-| Document | Purpose |
-|----------|---------|
-| [ONCHAIN_MIGRATION_COMPLETE.md](./ONCHAIN_MIGRATION_COMPLETE.md) | Summary of migration from synthetics to production |
-| [PRODUCTION_CHECKLIST.md](./PRODUCTION_CHECKLIST.md) | Pre-deployment validation checklist |
-| [THREAT_FLOW_ANALYSIS.md](./THREAT_FLOW_ANALYSIS.md) | Detailed threat analysis methodology |
-| [move/README.md](./move/README.md) | Move contract documentation |
+                 ↓ POST /api/threats/populate-wallet
 
 ---
 
@@ -75,6 +35,70 @@ curl -X POST http://localhost:8080/api/threats/populate-wallet \
 └────────────────┬────────────────────────────────────────┘
                  │
                  ↓ POST /api/threats/populate-wallet
+
+## Junk Type Pipeline
+
+DeepClean now uses a repeatable junk-type pipeline for testnet demos and detector coverage:
+
+1. Build a Move junk module under [move/sources/](move/sources/).
+2. Publish the package to testnet and capture the package ID.
+3. Seed real on-chain objects with [artifacts/deepclean/src/lib/seed-onchain-junk.ts](artifacts/deepclean/src/lib/seed-onchain-junk.ts).
+4. Populate the wallet from the API so Gemini can classify the object metadata.
+5. Record the threat on-chain with `quarantine_vault` and clean it through the wallet flow.
+
+Supported junk types in the current implementation:
+
+- `airdrop`
+- `rug`
+- `nft`
+- `pool`
+- `honeypot`
+- `staking`
+- `counterfeit`
+- `flash_loan`
+- `escrow`
+- `swap`
+- `governance`
+- `bridge`
+- `subscription`
+
+Example seeding command:
+
+```bash
+cd move && sui client publish --gas-budget 2000000000
+
+cd ..
+./scripts/node_modules/.bin/tsx artifacts/deepclean/src/lib/seed-onchain-junk.ts \
+  --address 0x<target_wallet> \
+  --key suiprivkey<agent_key> \
+  --package 0x<package_id> \
+  --network testnet \
+  --types staking,subscription
+```
+                - `pool`
+                - `honeypot`
+                - `staking`
+                - `counterfeit`
+                - `flash_loan`
+                - `escrow`
+                - `swap`
+                - `governance`
+                - `bridge`
+                - `subscription`
+
+                Example seeding command:
+
+                ```bash
+                cd move && sui client publish --gas-budget 2000000000
+
+                cd ..
+                ./scripts/node_modules/.bin/tsx artifacts/deepclean/src/lib/seed-onchain-junk.ts \
+                  --address 0x<target_wallet> \
+                  --key suiprivkey<agent_key> \
+                  --package 0x<package_id> \
+                  --network testnet \
+                  --types staking,subscription
+                ```
 ┌─────────────────────────────────────────────────────────┐
 │ API Server (Node.js)                                    │
 │ ├─ Fetch real wallet objects from Sui RPC              │

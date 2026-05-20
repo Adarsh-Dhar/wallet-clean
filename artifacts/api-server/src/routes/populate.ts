@@ -120,14 +120,98 @@ async function seedOnChainJunk(
       }
     }
 
-    // Log signatures for all junk mint functions before attempting PTBs
-    await Promise.all([
-      logMoveFunctionSig("malicious_airdrop", "mint"),
-      logMoveFunctionSig("rug_token", "airdrop_to"),
-      logMoveFunctionSig("fake_foundation_nft", "mint"),
-      logMoveFunctionSig("pool", "mint"),
-      logMoveFunctionSig("honeypot_defi", "stake_and_receive"),
-    ]);
+    // Probe deployed package for all supported mint functions so we can
+    // skip jobs that aren't present in the published spam package and
+    // avoid "FunctionNotFound" simulation errors.
+    // We'll also fetch the list of normalized modules from the package
+    // and resolve the actual module names to use in moveCall targets.
+    const MODULE_FN_PAIRS: Array<{ module: string; fn: string; key: string }> = [
+      { module: "malicious_airdrop", fn: "mint", key: "airdrop" },
+      { module: "rug_token", fn: "airdrop_to", key: "rug" },
+      { module: "fake_foundation_nft", fn: "mint", key: "nft" },
+      { module: "pool", fn: "mint", key: "pool" },
+      { module: "honeypot_defi", fn: "stake_and_receive", key: "honeypot" },
+      { module: "fake_staking", fn: "mint", key: "staking" },
+      { module: "counterfeit_nft", fn: "mint", key: "counterfeit" },
+      { module: "flash_loan_faker", fn: "mint", key: "flash_loan" },
+      { module: "marketplace_escrow", fn: "mint", key: "escrow" },
+      { module: "swap_tracker", fn: "mint", key: "swap" },
+      { module: "fake_governance", fn: "mint", key: "governance" },
+      { module: "bridge_faker", fn: "mint", key: "bridge" },
+      { module: "subscription_token", fn: "mint", key: "subscription" },
+    ];
+    const available = new Set<string>();
+    const resolvedModuleByKey = new Map<string, string>();
+
+    // Fetch normalized modules for the package so we can match actual
+    // compiled module names (defensively handling various RPC shapes).
+    try {
+      const norm = await (client as any).core.getNormalizedMoveModulesByPackage({ package: spamPackageId });
+      // defensive extraction of module list
+      const modList: any[] = Array.isArray(norm)
+        ? norm
+        : (norm && (norm.modules || norm.data || norm.result)) || [];
+
+      const names = modList.map((m: any) => {
+        // different RPC shapes may expose the module name under different keys
+        return m?.name ?? m?.module ?? (typeof m === "string" ? m : undefined);
+      }).filter(Boolean);
+
+      logger.info({ package: spamPackageId, modules: names }, "Normalized modules in package");
+
+      await Promise.all(
+        MODULE_FN_PAIRS.map(async ({ module, fn, key }) => {
+          try {
+            // prefer direct getMoveFunction probe (handles named-address resolution),
+            // but also try to detect an actual module name from the normalized list
+            const def = await (client as any).core.getMoveFunction({ packageId: spamPackageId, moduleName: module, name: fn });
+            if (def && def.function) {
+              available.add(key);
+              resolvedModuleByKey.set(key, module);
+              logger.info({ fn: `${spamPackageId}::${module}::${fn}` }, "Move function available");
+              return;
+            }
+          } catch (e) {
+            // fallthrough to attempt name resolution via normalized module list
+          }
+
+          // try to find a normalized module that contains the expected module token
+          const found = names.find((n: string) => n === module || n.endsWith(`::${module}`) || n.endsWith(module));
+          if (found) {
+            try {
+              const def2 = await (client as any).core.getMoveFunction({ packageId: spamPackageId, moduleName: found, name: fn });
+              if (def2 && def2.function) {
+                available.add(key);
+                resolvedModuleByKey.set(key, found);
+                logger.info({ fn: `${spamPackageId}::${found}::${fn}` }, "Move function available (resolved from normalized list)");
+                return;
+              }
+            } catch (e2) {
+              logger.warn({ err: e2, fn: `${spamPackageId}::${found}::${fn}` }, "Move function not found using resolved module name");
+            }
+          }
+
+          logger.warn({ fn: `${spamPackageId}::${module}::${fn}` }, "Move function not found in deployed package");
+        })
+      );
+    } catch (e) {
+      logger.warn({ err: e }, "Could not list normalized modules for package");
+      // fallback to conservative probing of each module name
+      await Promise.all(
+        MODULE_FN_PAIRS.map(async ({ module, fn, key }) => {
+          try {
+            const def = await (client as any).core.getMoveFunction({ packageId: spamPackageId, moduleName: module, name: fn });
+            if (def && def.function) {
+              available.add(key);
+              resolvedModuleByKey.set(key, module);
+              logger.info({ fn: `${spamPackageId}::${module}::${fn}` }, "Move function available");
+            }
+          } catch (e2) {
+            logger.warn({ err: e2, fn: `${spamPackageId}::${module}::${fn}` }, "Move function not found in deployed package (fallback)");
+          }
+        })
+      );
+    }
 
     async function executeAndWait(tx: Transaction): Promise<string> {
       const result = await executeTransactionWithRetry(tx);
@@ -288,13 +372,142 @@ async function seedOnChainJunk(
       return { digest: res.digest, created: createdHoney };
     }
 
-    const jobs: Array<{ key: string; label: string; fn: () => Promise<{ digest: string; created: string[] }> }> = [
+    async function mintFakeStaking(): Promise<{ digest: string; created: string[] }> {
+      const tx = new Transaction();
+      const moduleForStaking = resolvedModuleByKey.get("staking") ?? "fake_staking";
+      tx.moveCall({
+        target: `${spamPackageId}::${moduleForStaking}::mint`,
+        arguments: [tx.pure.address(targetAddress)],
+      });
+      const res = await executeAndGetResult(tx);
+      const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
+      const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
+      const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
+      return { digest: res.digest, created };
+    }
+
+    async function mintCounterfeitNft(): Promise<{ digest: string; created: string[] }> {
+      const tx = new Transaction();
+      const moduleForCounterfeit = resolvedModuleByKey.get("counterfeit") ?? "counterfeit_nft";
+      tx.moveCall({
+        target: `${spamPackageId}::${moduleForCounterfeit}::mint`,
+        arguments: [tx.pure.address(targetAddress)],
+      });
+      const res = await executeAndGetResult(tx);
+      const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
+      const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
+      const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
+      return { digest: res.digest, created };
+    }
+
+    async function mintFlashLoanTicket(): Promise<{ digest: string; created: string[] }> {
+      const tx = new Transaction();
+      const moduleForFlash = resolvedModuleByKey.get("flash_loan") ?? "flash_loan_faker";
+      tx.moveCall({
+        target: `${spamPackageId}::${moduleForFlash}::mint`,
+        arguments: [tx.pure.address(targetAddress)],
+      });
+      const res = await executeAndGetResult(tx);
+      const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
+      const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
+      const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
+      return { digest: res.digest, created };
+    }
+
+    async function mintMarketplaceEscrow(): Promise<{ digest: string; created: string[] }> {
+      const tx = new Transaction();
+      const moduleForEscrow = resolvedModuleByKey.get("escrow") ?? "marketplace_escrow";
+      tx.moveCall({
+        target: `${spamPackageId}::${moduleForEscrow}::mint`,
+        arguments: [tx.pure.address(targetAddress)],
+      });
+      const res = await executeAndGetResult(tx);
+      const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
+      const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
+      const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
+      return { digest: res.digest, created };
+    }
+
+    async function mintSwapReceipt(): Promise<{ digest: string; created: string[] }> {
+      const tx = new Transaction();
+      const moduleForSwap = resolvedModuleByKey.get("swap") ?? "swap_tracker";
+      tx.moveCall({
+        target: `${spamPackageId}::${moduleForSwap}::mint`,
+        arguments: [tx.pure.address(targetAddress)],
+      });
+      const res = await executeAndGetResult(tx);
+      const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
+      const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
+      const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
+      return { digest: res.digest, created };
+    }
+
+    async function mintFakeGovernanceToken(): Promise<{ digest: string; created: string[] }> {
+      const tx = new Transaction();
+      const moduleForGovernance = resolvedModuleByKey.get("governance") ?? "fake_governance";
+      tx.moveCall({
+        target: `${spamPackageId}::${moduleForGovernance}::mint`,
+        arguments: [tx.pure.address(targetAddress)],
+      });
+      const res = await executeAndGetResult(tx);
+      const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
+      const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
+      const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
+      return { digest: res.digest, created };
+    }
+
+    async function mintBridgeNotification(): Promise<{ digest: string; created: string[] }> {
+      const tx = new Transaction();
+      const moduleForBridge = resolvedModuleByKey.get("bridge") ?? "bridge_faker";
+      tx.moveCall({
+        target: `${spamPackageId}::${moduleForBridge}::mint`,
+        arguments: [tx.pure.address(targetAddress)],
+      });
+      const res = await executeAndGetResult(tx);
+      const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
+      const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
+      const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
+      return { digest: res.digest, created };
+    }
+
+    async function mintSubscriptionToken(): Promise<{ digest: string; created: string[] }> {
+      const tx = new Transaction();
+      const moduleForSubscription = resolvedModuleByKey.get("subscription") ?? "subscription_token";
+      tx.moveCall({
+        target: `${spamPackageId}::${moduleForSubscription}::mint`,
+        arguments: [tx.pure.address(targetAddress)],
+      });
+      const res = await executeAndGetResult(tx);
+      const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
+      const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
+      const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
+      return { digest: res.digest, created };
+    }
+
+    const ALL_POSSIBLE_JOBS: Array<{ key: string; label: string; fn: () => Promise<{ digest: string; created: string[] }> }> = [
       { key: "airdrop", label: "Fake SUI Airdrop Token", fn: mintAirdropToken },
       { key: "rug", label: "Rug Meme Coin", fn: mintRugToken },
       { key: "nft", label: "Fake Foundation NFT", fn: mintFakeFoundationNft },
       { key: "pool", label: "Spoofed Cetus LP Position", fn: mintSpoofedPool },
       { key: "honeypot", label: "Honeypot DeFi Token", fn: mintHoneypotToken },
+      { key: "staking", label: "Fake Staking Receipt", fn: mintFakeStaking },
+      { key: "counterfeit", label: "Counterfeit NFT", fn: mintCounterfeitNft },
+      { key: "flash_loan", label: "Flash Loan Ticket", fn: mintFlashLoanTicket },
+      { key: "escrow", label: "Marketplace Escrow Ticket", fn: mintMarketplaceEscrow },
+      { key: "swap", label: "Malicious Swap Receipt", fn: mintSwapReceipt },
+      { key: "governance", label: "Suspicious Governance Token", fn: mintFakeGovernanceToken },
+      { key: "bridge", label: "Bridge Notification", fn: mintBridgeNotification },
+      { key: "subscription", label: "Subscription Token", fn: mintSubscriptionToken },
     ];
+
+    // Filter jobs to only those whose mint function was discovered in the deployed package.
+    const jobs = ALL_POSSIBLE_JOBS.filter((j) => {
+      if (!available.has(j.key)) {
+        logger.warn({ job: j.key }, `Skipping ${j.label}: mint function not found in package ${spamPackageId}`);
+        return false;
+      }
+      return true;
+    });
 
     for (const job of jobs) {
       try {
@@ -314,7 +527,23 @@ async function seedOnChainJunk(
               ? `${spamPackageId}::fake_foundation_nft::FounderPass`
               : job.key === "pool"
                 ? `${spamPackageId}::pool::Position`
-                : `${spamPackageId}::honeypot_defi::HoneypotToken`;
+                : job.key === "honeypot"
+                  ? `${spamPackageId}::honeypot_defi::HoneypotToken`
+                  : job.key === "staking"
+                    ? `${spamPackageId}::fake_staking::StakingReceipt`
+                    : job.key === "counterfeit"
+                      ? `${spamPackageId}::counterfeit_nft::CounterfeitCollectable`
+                      : job.key === "flash_loan"
+                        ? `${spamPackageId}::flash_loan_faker::FlashLoanTicket`
+                        : job.key === "escrow"
+                          ? `${spamPackageId}::marketplace_escrow::EscrowTicket`
+                          : job.key === "swap"
+                            ? `${spamPackageId}::swap_tracker::SwapReceipt`
+                            : job.key === "governance"
+                              ? `${spamPackageId}::fake_governance::GovernanceToken`
+                              : job.key === "bridge"
+                                ? `${spamPackageId}::bridge_faker::BridgeNotification`
+                                : `${spamPackageId}::subscription_token::SubscriptionToken`;
 
         if (createdIds.length > 0) {
           for (const objId of createdIds) {
