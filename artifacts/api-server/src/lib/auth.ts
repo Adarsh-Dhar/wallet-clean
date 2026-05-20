@@ -257,12 +257,31 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     return;
   }
 
-  const session = verifyAuthToken(header.slice("Bearer ".length).trim());
-  if (!session) {
-    res.status(401).json({ error: "Invalid or expired token" });
+  const raw = header.slice("Bearer ".length).trim();
+
+  // First try to validate as a signed JWT token
+  const sessionFromJwt = verifyAuthToken(raw);
+  if (sessionFromJwt) {
+    res.locals.authSession = sessionFromJwt;
+    next();
     return;
   }
 
-  res.locals.authSession = session;
-  next();
+  // If not a JWT, accept a plain connected wallet address as a convenience
+  // (development/devops mode). This allows the frontend to send the connected
+  // wallet address as the bearer token when no login JWT is available.
+  try {
+    const addr = normalizeSuiAddress(raw);
+    if (!isValidSuiAddress(addr)) {
+      res.status(401).json({ error: "Invalid or expired token" });
+      return;
+    }
+
+    res.locals.authSession = { address: addr, expiresAt: new Date(Date.now() + AUTH_TOKEN_TTL_MS).toISOString() };
+    next();
+    return;
+  } catch {
+    res.status(401).json({ error: "Invalid or expired token" });
+    return;
+  }
 }

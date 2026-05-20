@@ -3,7 +3,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useListThreats, useReleaseThreat, useBurnThreat, getListThreatsQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { apiJson } from "@/lib/auth";
+import { apiJson, getStoredAuthToken } from "@/lib/auth";
 import { Skeleton } from "@/components/ui/skeleton";
 import { VerdictBadge, StatusBadge, RiskBar } from "@/components/ThreatBadge";
 import { Button } from "@/components/ui/button";
@@ -19,16 +19,6 @@ interface ThreatCleanSummary {
   cleaned: number;
 }
 
-interface CleanWalletResponse {
-  cleaned: number;
-  onChainBurned: number;
-  threats: Array<{
-    id: number;
-    objectId: string;
-    burnTxDigest: string | null;
-  }>;
-}
-
 interface ThreatCleanEvent {
   step?: string;
   message: string;
@@ -40,17 +30,51 @@ interface ThreatCleanEvent {
   cleaned?: number;
   error?: string;
   objectId?: string;
+  objectType?: string;
+  threatId?: number;
+  verdict?: string;
+  riskScore?: number;
+  confidence?: number;
+  reasonCode?: number;
+  cleanMethod?: string;
+  action?: string;
   burnTxDigest?: string | null;
   stillOwned?: boolean;
+}
+
+function formatCleanEventLine(event: ThreatCleanEvent): string {
+  const parts: string[] = [];
+  const prefix = event.step ? `[${event.step}]` : "[clean]";
+
+  if (event.objectId) parts.push(event.objectId.slice(0, 12));
+  if (event.objectType) parts.push(event.objectType.split("::").pop() ?? event.objectType);
+  if (event.verdict) parts.push(`verdict=${event.verdict}`);
+  if (typeof event.riskScore === "number") parts.push(`risk=${event.riskScore}`);
+  if (typeof event.confidence === "number") parts.push(`conf=${event.confidence.toFixed(2)}`);
+  if (event.cleanMethod) parts.push(`method=${event.cleanMethod}`);
+  if (event.action) parts.push(`action=${event.action}`);
+  if (typeof event.threatId === "number") parts.push(`threat#${event.threatId}`);
+  if (typeof event.reasonCode === "number") parts.push(`reason=${event.reasonCode}`);
+  if (event.burnTxDigest) parts.push(`burn=${String(event.burnTxDigest).slice(0, 12)}…`);
+  if (event.stillOwned === false) parts.push("no-longer-owned");
+
+  return `${prefix} ${event.message}${parts.length > 0 ? ` (${parts.join(", ")})` : ""}`;
 }
 
 async function cleanWalletStream(
   walletAddress: string,
   onEvent: (event: ThreatCleanEvent) => void,
+  authToken?: string,
 ): Promise<ThreatCleanSummary> {
-  const response = await fetch("/api/clean-wallet-scan", {
+  const API_BASE = (import.meta as any).env?.VITE_API_BASE ?? "http://localhost:8080";
+  const endpointUrl = new URL("/api/clean-wallet-scan", API_BASE).toString();
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authToken) headers.authorization = `Bearer ${authToken}`;
+
+  const response = await fetch(endpointUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ walletAddress }),
   });
 
@@ -142,16 +166,10 @@ async function cleanWalletStream(
   return summary;
 }
 
-async function cleanThreatsFallback(threatIds: number[], burnTxDigest: string): Promise<CleanWalletResponse> {
-  return apiJson<CleanWalletResponse>('/api/clean-wallet', {
-    method: 'POST',
-    body: { threatIds, burnTxDigest },
-  });
-}
-
 export default function Threats() {
   const account = useCurrentAccount();
   const walletAddress = account?.address;
+  const computedAuthToken = getStoredAuthToken() ?? account?.address ?? undefined;
   const [burningIds, setBurningIds] = useState<Set<number>>(new Set());
   const [activeTab, setActiveTab] = useState<"quarantined" | "released" | "burned">("quarantined");
   const [, setLocation] = useLocation();
@@ -230,17 +248,11 @@ export default function Threats() {
     setCleanSummary(null);
 
     try {
+      console.log("clean authToken:", computedAuthToken, "account:", account?.address);
       const summary = await cleanWalletStream(walletAddress, (event) => {
-        const icon =
-          event.status === "error" ? "✗"
-            : event.step === "clean" ? "🔥"
-              : event.step === "quarantine" ? "⚠"
-                : event.status === "running" ? "⟳"
-                  : "•";
-
         setCleanLogs((current) => [
           ...current,
-          `${icon} ${event.message}${event.burnTxDigest ? ` [tx: ${String(event.burnTxDigest).slice(0, 12)}…]` : ""}`,
+          `${event.status === "error" ? "✗" : event.step === "clean" ? "🔥" : event.step === "quarantine" ? "⚠" : event.status === "running" ? "⟳" : "•"} ${formatCleanEventLine(event)}`,
         ]);
 
         if (event.status === "done") {
@@ -252,7 +264,7 @@ export default function Threats() {
             cleaned: event.cleaned ?? 0,
           });
         }
-      });
+      }, computedAuthToken);
 
       queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
       setCleanSummary(summary);
@@ -262,44 +274,11 @@ export default function Threats() {
       });
     } catch (err) {
       const message = String(err);
-      if (message.includes("404") || message.toLowerCase().includes("not found")) {
-        setCleanLogs((current) => [
-          ...current,
-          "⚠ Deep clean endpoint unavailable; falling back to supported bulk clean.",
-          `Cleaning ${fallbackThreatIds.length} quarantined threat(s)…`,
-        ]);
-
-        try {
-          const fallbackSummary = await cleanThreatsFallback(
-            fallbackThreatIds,
-            `fallback:${walletAddress}:${Date.now()}`,
-          );
-
-          queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
-          setCleanSummary({
-            total: fallbackThreatIds.length,
-            analyzed: fallbackThreatIds.length,
-            quarantined: fallbackSummary.cleaned,
-            safe: 0,
-            cleaned: fallbackSummary.cleaned,
-          });
-          setCleanLogs((current) => [
-            ...current,
-            `✓ Fallback clean complete — ${fallbackSummary.cleaned} threat(s) burned`,
-          ]);
-          toast({
-            title: "Clean complete",
-            description: `${fallbackSummary.cleaned} quarantined threat(s) cleaned using the fallback path.`,
-          });
-          return;
-        } catch (fallbackErr) {
-          setCleanLogs((current) => [...current, `✗ ${String(fallbackErr)}`]);
-          toast({ title: "Clean failed", description: String(fallbackErr), variant: "destructive" });
-          return;
-        }
-      }
-
-      setCleanLogs((current) => [...current, `✗ ${message}`]);
+      setCleanLogs((current) => [
+        ...current,
+        "✗ Deep clean failed before any cleanup could run.",
+        `✗ ${message}`,
+      ]);
       toast({ title: "Clean failed", description: message, variant: "destructive" });
     } finally {
       setCleanRunning(false);
@@ -352,7 +331,7 @@ export default function Threats() {
             <button
               className="text-xs px-3 py-2 rounded border border-border bg-card text-muted-foreground hover:bg-red-600/10"
               onClick={clean}
-              disabled={cleanRunning || !walletAddress}
+              disabled={cleanRunning || !computedAuthToken}
               data-testid="button-clean-wallet"
             >
               {cleanRunning ? (

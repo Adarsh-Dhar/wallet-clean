@@ -806,6 +806,21 @@ router.post("/clean-wallet-scan", async (req, res) => {
         });
 
         if ((verdict.verdict === "MALICIOUS" || verdict.verdict === "SUSPICIOUS") && verdict.risk_score >= MIN_RISK_SCORE_FOR_QUARANTINE) {
+          emitLog(
+            "analyze",
+            `AI verdict ${verdict.verdict} at risk ${verdict.risk_score}/100`,
+            {
+              objectId: object.objectId,
+              objectType: object.objectType,
+              riskScore: verdict.risk_score,
+              verdict: verdict.verdict,
+              confidence: verdict.confidence,
+              reasonCode: verdict.reason_code,
+              cleanMethod: verdict.clean_method,
+              flags: verdict.flags,
+            },
+          );
+
           const logPayload = buildThreatLog({
             objectId: object.objectId,
             objectType: object.objectType,
@@ -849,46 +864,136 @@ router.post("/clean-wallet-scan", async (req, res) => {
             { objectId: object.objectId, threatId: threat.id, riskScore: verdict.risk_score, verdict: verdict.verdict, stillOwned: object.stillOwned },
           );
 
-          if (object.stillOwned && isOnChainEnabled()) {
-            emitLog("clean", `Attempting on-chain clean for ${object.objectId}…`, { objectId: object.objectId }, "running");
+          if (isOnChainEnabled()) {
+            if (object.stillOwned) {
+              // If the object is still owned by the user's wallet, the agent
+              // cannot sign a transaction to dispose of it. Require a
+              // user-signed action (manual burn) instead of attempting an
+              // on-chain transfer with the agent key which will always fail.
+              emitLog(
+                "clean",
+                `Object ${object.objectId} is still owned by the wallet; cannot auto-clean without user signature`,
+                { objectId: object.objectId, objectType: object.objectType, cleanMethod: verdict.clean_method, action: "requires-user-signature" },
+                "error",
+              );
+
+              emitLog("clean", `Could not auto-clean ${object.objectId} (manual burn needed)`, { objectId: object.objectId, objectType: object.objectType, cleanMethod: verdict.clean_method, action: "manual-review" }, "error");
+            } else {
+            emitLog(
+              "clean",
+              `Preparing on-chain clean for ${object.objectId}`,
+              {
+                objectId: object.objectId,
+                objectType: object.objectType,
+                verdict: verdict.verdict,
+                riskScore: verdict.risk_score,
+                confidence: verdict.confidence,
+                reasonCode: verdict.reason_code,
+                cleanMethod: verdict.clean_method,
+              },
+              "running",
+            );
 
             let burnDigest: string | null = null;
 
             if (verdict.clean_method === "merge_dust") {
               const coinType = object.objectType.match(/::coin::Coin<(.+)>$/)?.[1] ?? null;
+              emitLog(
+                "clean",
+                coinType
+                  ? `Selected merge_dust for coin type ${coinType}`
+                  : "Selected merge_dust, but coin type could not be derived",
+                {
+                  objectId: object.objectId,
+                  objectType: object.objectType,
+                  cleanMethod: verdict.clean_method,
+                  action: "mergeCoins",
+                },
+              );
+
               if (coinType) {
                 const coins = await fetchCoinObjects(walletAddress, coinType);
+                emitLog(
+                  "clean",
+                  `Resolved ${coins.length} coin object(s) for dust merge`,
+                  {
+                    objectId: object.objectId,
+                    objectType: object.objectType,
+                    cleanMethod: verdict.clean_method,
+                    action: "fetchCoinObjects",
+                  },
+                );
                 if (coins.length >= 2) {
                   burnDigest = await mergeDustOnChain({
                     coinType,
                     primaryCoinId: coins[0].coinObjectId,
                     dustCoinIds: coins.slice(1).map((coin) => coin.coinObjectId),
                   }).catch(() => null);
+                  emitLog(
+                    "clean",
+                    burnDigest ? "merge_dust transaction submitted" : "merge_dust transaction failed or was skipped",
+                    {
+                      objectId: object.objectId,
+                      objectType: object.objectType,
+                      cleanMethod: verdict.clean_method,
+                      action: "mergeDustOnChain",
+                      burnTxDigest: burnDigest,
+                    },
+                  );
                 }
               }
             } else {
+              emitLog(
+                "clean",
+                "Selected transfer_to_dead / vault_burn path",
+                {
+                  objectId: object.objectId,
+                  objectType: object.objectType,
+                  cleanMethod: verdict.clean_method,
+                  action: "sendToDeadOnChain",
+                },
+              );
+
               const abilities = await fetchObjectAbilities(object.objectType);
               if (abilities.map((ability) => ability.toLowerCase()).includes("store")) {
                 burnDigest = await sendToDeadOnChain({
                   objectId: object.objectId,
                   objectType: object.objectType,
                 }).catch(() => null);
+                emitLog(
+                  "clean",
+                  burnDigest ? "send_to_dead transaction submitted" : "send_to_dead skipped or failed",
+                  {
+                    objectId: object.objectId,
+                    objectType: object.objectType,
+                    cleanMethod: verdict.clean_method,
+                    action: "sendToDeadOnChain",
+                    burnTxDigest: burnDigest,
+                  },
+                );
               }
             }
 
             if (burnDigest) {
               await prisma.threat.update({ where: { id: threat.id }, data: { status: "burned", burnTxDigest: burnDigest } }).catch(() => {});
               cleaned += 1;
-              emitLog("clean", `Cleaned ${object.objectId}`, { objectId: object.objectId, burnTxDigest: burnDigest });
+              emitLog("clean", `Cleaned ${object.objectId}`, {
+                objectId: object.objectId,
+                objectType: object.objectType,
+                burnTxDigest: burnDigest,
+                cleanMethod: verdict.clean_method,
+                action: "db:update",
+              });
             } else {
-              emitLog("clean", `Could not auto-clean ${object.objectId} (manual burn needed)`, { objectId: object.objectId }, "error");
+              emitLog("clean", `Could not auto-clean ${object.objectId} (manual burn needed)`, { objectId: object.objectId, objectType: object.objectType, cleanMethod: verdict.clean_method, action: "manual-review" }, "error");
+            }
             }
           } else if (!object.stillOwned) {
-            emitLog("skip", `Object no longer in wallet — skipping burn`, { objectId: object.objectId });
+            emitLog("skip", `Object no longer in wallet — skipping burn`, { objectId: object.objectId, objectType: object.objectType, cleanMethod: verdict.clean_method, action: "skip-not-owned" });
           }
         } else {
           safe += 1;
-          emitLog("analyze", `Safe ${object.objectType}`, { objectId: object.objectId, riskScore: verdict.risk_score, verdict: verdict.verdict });
+          emitLog("analyze", `Safe ${object.objectType}`, { objectId: object.objectId, objectType: object.objectType, riskScore: verdict.risk_score, verdict: verdict.verdict, confidence: verdict.confidence, reasonCode: verdict.reason_code, cleanMethod: verdict.clean_method });
         }
       } catch (error) {
         emitLog(
