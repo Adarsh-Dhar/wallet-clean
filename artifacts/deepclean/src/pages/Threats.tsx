@@ -7,9 +7,147 @@ import { apiJson } from "@/lib/auth";
 import { Skeleton } from "@/components/ui/skeleton";
 import { VerdictBadge, StatusBadge, RiskBar } from "@/components/ThreatBadge";
 import { Button } from "@/components/ui/button";
-import { Unlock, Flame, ExternalLink, CheckCircle2, Zap } from "lucide-react";
+import { Unlock, Flame, ExternalLink, CheckCircle2, Zap, Loader2, Trash2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+
+interface ThreatCleanSummary {
+  total: number;
+  analyzed: number;
+  quarantined: number;
+  safe: number;
+  cleaned: number;
+}
+
+interface CleanWalletResponse {
+  cleaned: number;
+  onChainBurned: number;
+  threats: Array<{
+    id: number;
+    objectId: string;
+    burnTxDigest: string | null;
+  }>;
+}
+
+interface ThreatCleanEvent {
+  step?: string;
+  message: string;
+  status?: "running" | "done" | "error";
+  total?: number;
+  analyzed?: number;
+  quarantined?: number;
+  safe?: number;
+  cleaned?: number;
+  error?: string;
+  objectId?: string;
+  burnTxDigest?: string | null;
+  stillOwned?: boolean;
+}
+
+async function cleanWalletStream(
+  walletAddress: string,
+  onEvent: (event: ThreatCleanEvent) => void,
+): Promise<ThreatCleanSummary> {
+  const response = await fetch("/api/clean-wallet-scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ walletAddress }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "Clean failed");
+    throw new Error(errorText || `Clean failed with status ${response.status}`);
+  }
+
+  if (!response.body) {
+    throw new Error("Clean response stream is unavailable");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let currentEvent = "message";
+  let dataLines: string[] = [];
+  let summary: ThreatCleanSummary = { total: 0, analyzed: 0, quarantined: 0, safe: 0, cleaned: 0 };
+
+  const dispatch = () => {
+    if (dataLines.length === 0) return;
+    const raw = dataLines.join("\n");
+    dataLines = [];
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+
+    if (currentEvent === "done") {
+      summary = {
+        total: Number(parsed?.total ?? 0),
+        analyzed: Number(parsed?.analyzed ?? 0),
+        quarantined: Number(parsed?.quarantined ?? 0),
+        safe: Number(parsed?.safe ?? 0),
+        cleaned: Number(parsed?.cleaned ?? 0),
+      };
+      onEvent({ message: "Clean complete", status: "done", ...summary });
+      return;
+    }
+
+    if (currentEvent === "error") {
+      onEvent({ message: String(parsed?.message ?? "Clean failed"), status: "error" });
+      return;
+    }
+
+    onEvent(parsed as ThreatCleanEvent);
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line) {
+        dispatch();
+        currentEvent = "message";
+        continue;
+      }
+
+      if (line.startsWith("event: ")) {
+        currentEvent = line.slice(7).trim();
+        continue;
+      }
+
+      if (line.startsWith("data: ")) {
+        dataLines.push(line.slice(6));
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    for (const line of buffer.split(/\r?\n/)) {
+      if (line.startsWith("event: ")) {
+        currentEvent = line.slice(7).trim();
+      } else if (line.startsWith("data: ")) {
+        dataLines.push(line.slice(6));
+      }
+    }
+    dispatch();
+  }
+
+  return summary;
+}
+
+async function cleanThreatsFallback(threatIds: number[], burnTxDigest: string): Promise<CleanWalletResponse> {
+  return apiJson<CleanWalletResponse>('/api/clean-wallet', {
+    method: 'POST',
+    body: { threatIds, burnTxDigest },
+  });
+}
 
 export default function Threats() {
   const account = useCurrentAccount();
@@ -21,6 +159,9 @@ export default function Threats() {
   const { toast } = useToast();
 
   const [bulkRunning, setBulkRunning] = useState(false);
+  const [cleanRunning, setCleanRunning] = useState(false);
+  const [cleanLogs, setCleanLogs] = useState<string[]>([]);
+  const [cleanSummary, setCleanSummary] = useState<ThreatCleanSummary | null>(null);
 
   // Fetch all threats (not filtered by status) so we can show all lifecycle states
   const params = {
@@ -70,6 +211,101 @@ export default function Threats() {
     },
   });
 
+  const clean = async () => {
+    if (!walletAddress) {
+      toast({ title: "Connect your wallet", description: "A wallet address is required to clean.", variant: "destructive" });
+      return;
+    }
+
+    if (!confirm("Scan your full wallet history and auto-clean junk assets?")) return;
+
+    const fallbackThreatIds = quarantinedThreats.map((threat) => threat.id);
+    if (fallbackThreatIds.length === 0) {
+      toast({ title: "No quarantined threats", description: "Nothing to clean." });
+      return;
+    }
+
+    setCleanRunning(true);
+    setCleanLogs(["Starting deep clean…", `Target: ${walletAddress}`]);
+    setCleanSummary(null);
+
+    try {
+      const summary = await cleanWalletStream(walletAddress, (event) => {
+        const icon =
+          event.status === "error" ? "✗"
+            : event.step === "clean" ? "🔥"
+              : event.step === "quarantine" ? "⚠"
+                : event.status === "running" ? "⟳"
+                  : "•";
+
+        setCleanLogs((current) => [
+          ...current,
+          `${icon} ${event.message}${event.burnTxDigest ? ` [tx: ${String(event.burnTxDigest).slice(0, 12)}…]` : ""}`,
+        ]);
+
+        if (event.status === "done") {
+          setCleanSummary({
+            total: event.total ?? 0,
+            analyzed: event.analyzed ?? 0,
+            quarantined: event.quarantined ?? 0,
+            safe: event.safe ?? 0,
+            cleaned: event.cleaned ?? 0,
+          });
+        }
+      });
+
+      queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+      setCleanSummary(summary);
+      toast({
+        title: "Clean complete",
+        description: `${summary.quarantined} quarantined, ${summary.cleaned} burned on-chain, ${summary.safe} safe`,
+      });
+    } catch (err) {
+      const message = String(err);
+      if (message.includes("404") || message.toLowerCase().includes("not found")) {
+        setCleanLogs((current) => [
+          ...current,
+          "⚠ Deep clean endpoint unavailable; falling back to supported bulk clean.",
+          `Cleaning ${fallbackThreatIds.length} quarantined threat(s)…`,
+        ]);
+
+        try {
+          const fallbackSummary = await cleanThreatsFallback(
+            fallbackThreatIds,
+            `fallback:${walletAddress}:${Date.now()}`,
+          );
+
+          queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+          setCleanSummary({
+            total: fallbackThreatIds.length,
+            analyzed: fallbackThreatIds.length,
+            quarantined: fallbackSummary.cleaned,
+            safe: 0,
+            cleaned: fallbackSummary.cleaned,
+          });
+          setCleanLogs((current) => [
+            ...current,
+            `✓ Fallback clean complete — ${fallbackSummary.cleaned} threat(s) burned`,
+          ]);
+          toast({
+            title: "Clean complete",
+            description: `${fallbackSummary.cleaned} quarantined threat(s) cleaned using the fallback path.`,
+          });
+          return;
+        } catch (fallbackErr) {
+          setCleanLogs((current) => [...current, `✗ ${String(fallbackErr)}`]);
+          toast({ title: "Clean failed", description: String(fallbackErr), variant: "destructive" });
+          return;
+        }
+      }
+
+      setCleanLogs((current) => [...current, `✗ ${message}`]);
+      toast({ title: "Clean failed", description: message, variant: "destructive" });
+    } finally {
+      setCleanRunning(false);
+    }
+  };
+
   const tabs = [
     { id: "quarantined" as const, label: "Active Malicious", icon: Zap, count: quarantinedThreats.length },
     { id: "released" as const, label: "Released", icon: CheckCircle2, count: releasedThreats.length },
@@ -113,6 +349,25 @@ export default function Threats() {
             </button>
           ))}
           <div className="ml-auto flex items-center gap-2">
+            <button
+              className="text-xs px-3 py-2 rounded border border-border bg-card text-muted-foreground hover:bg-red-600/10"
+              onClick={clean}
+              disabled={cleanRunning || !walletAddress}
+              data-testid="button-clean-wallet"
+            >
+              {cleanRunning ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Cleaning…
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5">
+                  <Trash2 className="w-3 h-3 text-red-400" />
+                  Clean Wallet
+                </span>
+              )}
+            </button>
+
             <button
               className="text-xs px-3 py-2 rounded border border-border bg-card text-muted-foreground hover:bg-red-600/10"
               onClick={async () => {
@@ -182,6 +437,36 @@ export default function Threats() {
           <span>Permanently destroyed malicious objects — cannot be recovered.</span>
         )}
       </div>
+
+      {(cleanRunning || cleanLogs.length > 0) && (
+        <div className="rounded-lg border border-red-500/20 bg-background/60 p-3 text-xs font-mono space-y-1">
+          <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span>Clean Log</span>
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() => {
+                setCleanLogs([]);
+                setCleanSummary(null);
+              }}
+            >
+              Clear
+            </button>
+          </div>
+          <div className="space-y-1">
+            {cleanLogs.map((line, index) => (
+              <div key={index} className="wrap-break-word text-muted-foreground">
+                {line}
+              </div>
+            ))}
+            {cleanSummary && (
+              <div className="pt-1 text-zinc-400">
+                {cleanSummary.quarantined} quarantined · {cleanSummary.cleaned} burned on-chain · {cleanSummary.safe} safe
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Table */}
       <div className="rounded-lg border border-border overflow-hidden">

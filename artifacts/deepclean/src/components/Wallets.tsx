@@ -167,116 +167,14 @@ async function scanWalletStream(
 
   return summary;
 }
-
-async function cleanWalletStream(
-  walletAddress: string,
-  onEvent: (event: ScanEvent & { stillOwned?: boolean; burnTxDigest?: string }) => void,
-): Promise<ScanSummary & { cleaned: number }> {
-  const response = await fetch("/api/clean-wallet-scan", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ walletAddress }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => "Clean failed");
-    throw new Error(errorText || `Clean failed with status ${response.status}`);
-  }
-
-  if (!response.body) {
-    throw new Error("Clean response stream is unavailable");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let currentEvent = "message";
-  let dataLines: string[] = [];
-  let summary: ScanSummary & { cleaned: number } = { total: 0, analyzed: 0, quarantined: 0, safe: 0, cleaned: 0 };
-
-  const dispatch = () => {
-    if (dataLines.length === 0) return;
-    const raw = dataLines.join("\n");
-    dataLines = [];
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return;
-    }
-
-    if (currentEvent === "done") {
-      summary = {
-        total: Number(parsed?.total ?? 0),
-        analyzed: Number(parsed?.analyzed ?? 0),
-        quarantined: Number(parsed?.quarantined ?? 0),
-        safe: Number(parsed?.safe ?? 0),
-        cleaned: Number(parsed?.cleaned ?? 0),
-      };
-      onEvent({ message: "Clean complete", status: "done", ...summary });
-      return;
-    }
-
-    if (currentEvent === "error") {
-      onEvent({ message: String(parsed?.message ?? "Clean failed"), status: "error" });
-      return;
-    }
-
-    onEvent(parsed as ScanEvent & { stillOwned?: boolean; burnTxDigest?: string });
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      if (!line) {
-        dispatch();
-        currentEvent = "message";
-        continue;
-      }
-
-      if (line.startsWith("event: ")) {
-        currentEvent = line.slice(7).trim();
-        continue;
-      }
-
-      if (line.startsWith("data: ")) {
-        dataLines.push(line.slice(6));
-      }
-    }
-  }
-
-  if (buffer.trim()) {
-    for (const line of buffer.split(/\r?\n/)) {
-      if (line.startsWith("event: ")) {
-        currentEvent = line.slice(7).trim();
-      } else if (line.startsWith("data: ")) {
-        dataLines.push(line.slice(6));
-      }
-    }
-    dispatch();
-  }
-
-  return summary;
-}
 export default function Wallets() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [populatingId, setPopulatingId] = useState<number | null>(null);
   const [scanningId, setScanningId] = useState<number | null>(null);
-  const [cleaningId, setCleaningId] = useState<number | null>(null);
   const [scanLogs, setScanLogs] = useState<Record<number, string[]>>({});
-  const [cleanLogs, setCleanLogs] = useState<Record<number, string[]>>({});
   const [scanSummary, setScanSummary] = useState<Record<number, ScanSummary | null>>({});
-  const [cleanSummary, setCleanSummary] = useState<Record<number, (ScanSummary & { cleaned: number }) | null>>({});
   const [openScanLog, setOpenScanLog] = useState<number | null>(null);
-  const [openCleanLog, setOpenCleanLog] = useState<number | null>(null);
 
   // Get the currently connected Sui wallet
   const account = useCurrentAccount();
@@ -433,53 +331,6 @@ export default function Wallets() {
     onError: (error) => {
       toast({
         title: "Scan failed",
-        description: String(error),
-        variant: "destructive",
-      });
-    },
-  });
-
-  const clean = useMutation({
-    mutationFn: ({ address, walletId }: { address: string; walletId: number }) =>
-      cleanWalletStream(address, (event) => {
-        const icon =
-          event.status === "error" ? "✗"
-            : event.step === "clean" ? "🔥"
-              : event.step === "quarantine" ? "⚠"
-                : event.status === "running" ? "⟳"
-                  : "•";
-        setCleanLogs((current) => ({
-          ...current,
-          [walletId]: [
-            ...(current[walletId] ?? []),
-            `${icon} ${event.message}${event.burnTxDigest ? ` [tx: ${event.burnTxDigest.slice(0, 12)}…]` : ""}`,
-          ],
-        }));
-
-        if (event.status === "done") {
-          setCleanSummary((current) => ({
-            ...current,
-            [walletId]: event as ScanSummary & { cleaned: number },
-          }));
-        }
-      }),
-    onMutate: ({ walletId, address }) => {
-      setCleaningId(walletId);
-      setOpenCleanLog(walletId);
-      setCleanLogs((current) => ({
-        ...current,
-        [walletId]: ["🧹 Starting deep clean…", `Target: ${address}`],
-      }));
-      setCleanSummary((current) => ({ ...current, [walletId]: null }));
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
-      queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
-    },
-    onSettled: () => setCleaningId(null),
-    onError: (error) => {
-      toast({
-        title: "Clean failed",
         description: String(error),
         variant: "destructive",
       });
@@ -648,28 +499,6 @@ export default function Wallets() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-red-400 hover:bg-red-500/10 shrink-0"
-                  onClick={() => clean.mutate({ address: wallet.address, walletId: wallet.id })}
-                  disabled={clean.isPending || scan.isPending}
-                  title="Scan full tx history and auto-burn all junk"
-                  data-testid={`button-clean-wallet-${wallet.id}`}
-                >
-                  {cleaningId === wallet.id ? (
-                    <>
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                      <span className="hidden sm:inline">Cleaning…</span>
-                    </>
-                  ) : (
-                    <>
-                      <Trash2 className="w-3 h-3 text-red-400" />
-                      <span className="hidden sm:inline">Clean</span>
-                    </>
-                  )}
-                </Button>
-
-                <Button
-                  variant="ghost"
-                  size="sm"
                   className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-cyan-400 hover:bg-cyan-500/10 shrink-0"
                   onClick={() => populate.mutate({ address: wallet.address })}
                   disabled={populate.isPending || scan.isPending}
@@ -734,37 +563,6 @@ export default function Wallets() {
                 </div>
               )}
 
-              {openCleanLog === wallet.id && (
-                <div className="basis-full rounded-lg border border-red-500/20 bg-background/50 p-3 text-xs font-mono space-y-1">
-                  <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
-                    <span>Clean Log</span>
-                    <button
-                      type="button"
-                      className="text-muted-foreground hover:text-foreground"
-                      onClick={() => setOpenCleanLog(null)}
-                    >
-                      Close
-                    </button>
-                  </div>
-
-                  {(cleanLogs[wallet.id]?.length ?? 0) > 0 ? (
-                    <div className="space-y-1">
-                      {cleanLogs[wallet.id]!.map((line, index) => (
-                        <div key={index} className="wrap-break-word text-muted-foreground">
-                          {line}
-                        </div>
-                      ))}
-                      {cleanSummary[wallet.id] && (
-                        <div className="pt-1 text-zinc-400">
-                          {cleanSummary[wallet.id]!.quarantined} quarantined · {cleanSummary[wallet.id]!.cleaned} burned on-chain · {cleanSummary[wallet.id]!.safe} safe
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="text-muted-foreground">Waiting for clean output…</div>
-                  )}
-                </div>
-              )}
             </div>
           ))
         ) : (
