@@ -199,9 +199,19 @@ function scoreFromSignals(s: StaticSignals): { adjustment: number; flags: string
   return { adjustment, flags };
 }
 
-function isDemoJunkAsset(input: ThreatAnalysisInput): boolean {
+function isKnownJunkAsset(input: ThreatAnalysisInput): boolean {
   const moduleSegment = input.objectType.split("::")?.[1]?.toLowerCase() ?? "";
-  return DEMO_JUNK_MODULES.some((m) => moduleSegment.includes(m));
+  const abi = typeof input.moveAbi === "string" ? input.moveAbi.toLowerCase() : "";
+  const name = (input.displayName ?? "").toLowerCase();
+  const url = input.displayUrl ?? "";
+
+  if (DEMO_JUNK_MODULES.some((m) => moduleSegment.includes(m))) return true;
+  if (KNOWN_ATTACK_MODULES.some((m) => moduleSegment.includes(m))) return true;
+  if (DANGEROUS_ABI_PATTERNS.some((pattern) => abi.includes(pattern))) return true;
+  if (KNOWN_BRANDS.some((brand) => name.includes(brand))) return true;
+  if (url && !isTrustedDomain(url) && SUSPICIOUS_URL_PATTERNS.some((pattern) => pattern.test(url))) return true;
+
+  return false;
 }
 
 function makeDemoJunkAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
@@ -293,7 +303,7 @@ function enqueueModelCall<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 export async function analyzeThreat(input: ThreatAnalysisInput): Promise<ThreatAnalysisOutput> {
-  if (isDemoJunkAsset(input)) {
+  if (isKnownJunkAsset(input)) {
     return makeDemoJunkAnalysis(input);
   }
 
@@ -469,7 +479,7 @@ export interface BatchThreatOutput {
 export async function analyzeThreatBatch(
   inputs: BatchThreatInput[]
 ): Promise<BatchThreatOutput[]> {
-  const demoJunkOverrides = inputs.map((input) => isDemoJunkAsset(input) ? makeDemoJunkAnalysis(input) : null);
+  const demoJunkOverrides = inputs.map((input) => isKnownJunkAsset(input) ? makeDemoJunkAnalysis(input) : null);
 
   if (!GITHUB_MODELS_TOKEN) {
     logger.warn("GITHUB_MODELS_TOKEN not set, returning mock batch analysis");
@@ -655,7 +665,7 @@ function validateVerdict(v: unknown): "SAFE" | "SUSPICIOUS" | "MALICIOUS" {
  * safe NFT, no-metadata edge case).
  */
 function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
-  if (isDemoJunkAsset(input)) {
+  if (isKnownJunkAsset(input)) {
     return makeDemoJunkAnalysis(input);
   }
 

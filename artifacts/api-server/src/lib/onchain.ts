@@ -630,6 +630,10 @@ export interface WalletOwnedObject {
   moveAbi: string | null;
 }
 
+export interface WalletActivityObject extends WalletOwnedObject {
+  stillOwned: boolean;
+}
+
 /**
  * Fetch all owned objects for a wallet across every RPC page.
  */
@@ -672,4 +676,67 @@ export async function fetchAllWalletObjects(walletAddress: string): Promise<Wall
   }
 
   return objects;
+}
+
+/**
+ * Fetch every object a wallet has received in its transaction history and mark
+ * whether each object is still currently owned.
+ */
+export async function fetchWalletActivityObjects(walletAddress: string): Promise<WalletActivityObject[]> {
+  const client = getClient();
+  const receivedObjects = new Map<string, string>();
+  let cursor: string | null = null;
+  let hasNextPage = true;
+
+  while (hasNextPage) {
+    const page: any = await (client as any).queryTransactionBlocks({
+      filter: { ToAddress: walletAddress },
+      options: { showObjectChanges: true, showInput: false, showEffects: false },
+      cursor,
+      limit: 50,
+      order: "descending",
+    });
+
+    for (const tx of page.data ?? []) {
+      for (const change of tx.objectChanges ?? []) {
+        const isReceived =
+          change?.type === "created" ||
+          (change?.type === "transferred" && change?.recipient === walletAddress);
+
+        if (!isReceived) continue;
+
+        const objectId = change?.objectId;
+        const objectType = change?.objectType;
+        if (typeof objectId === "string" && typeof objectType === "string" && objectId && objectType) {
+          receivedObjects.set(objectId, objectType);
+        }
+      }
+    }
+
+    cursor = page.nextCursor ?? null;
+    hasNextPage = Boolean(page.hasNextPage && cursor);
+  }
+
+  const ownedNow = await fetchAllWalletObjects(walletAddress);
+  const ownedNowIds = new Set(ownedNow.map((object) => object.objectId));
+
+  const activityObjects: WalletActivityObject[] = ownedNow.map((object) => ({
+    ...object,
+    stillOwned: true,
+  }));
+
+  for (const [objectId, objectType] of receivedObjects.entries()) {
+    if (ownedNowIds.has(objectId)) continue;
+
+    activityObjects.push({
+      objectId,
+      objectType,
+      displayName: null,
+      displayUrl: null,
+      moveAbi: null,
+      stillOwned: false,
+    });
+  }
+
+  return activityObjects;
 }

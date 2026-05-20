@@ -16,7 +16,7 @@ import {
   isOnChainEnabled,
   sendToDeadOnChain,
   mergeDustOnChain,
-  fetchAllWalletObjects,
+  fetchWalletActivityObjects,
   getSuiRpcUrl,
 } from "../lib/onchain";
 import { MIN_RISK_SCORE_FOR_QUARANTINE } from "../lib/constants";
@@ -594,8 +594,8 @@ router.post("/scan-wallet", async (req, res) => {
 
   try {
     emitLog("fetch", "Fetching all owned objects…", {}, "running");
-    const objects = await fetchAllWalletObjects(walletAddress);
-    emitLog("fetch", `Found ${objects.length} owned object(s)`, { count: objects.length });
+    const objects = await fetchWalletActivityObjects(walletAddress);
+    emitLog("fetch", `Found ${objects.length} object(s) across wallet history`, { count: objects.length });
 
     const existing = await prisma.threat.findMany({
       where: {
@@ -619,7 +619,7 @@ router.post("/scan-wallet", async (req, res) => {
       emitLog(
         "analyze",
         `Analyzing ${object.objectType}`,
-        { objectId: object.objectId, objectType: object.objectType },
+        { objectId: object.objectId, objectType: object.objectType, stillOwned: object.stillOwned },
         "running",
       );
 
@@ -698,7 +698,7 @@ router.post("/scan-wallet", async (req, res) => {
           emitLog(
             "quarantine",
             `Quarantined ${object.objectType}`,
-            { objectId: object.objectId, threatId: threat.id, onChainDigest, riskScore: verdict.risk_score, verdict: verdict.verdict },
+            { objectId: object.objectId, threatId: threat.id, onChainDigest, riskScore: verdict.risk_score, verdict: verdict.verdict, stillOwned: object.stillOwned },
           );
         } else {
           safe += 1;
@@ -728,6 +728,187 @@ router.post("/scan-wallet", async (req, res) => {
     emit("error", {
       message: error instanceof Error ? error.message : "Wallet scan failed",
     });
+  } finally {
+    res.end();
+  }
+});
+
+// POST /clean-wallet-scan — scan historical wallet activity and clean in one pass
+router.post("/clean-wallet-scan", async (req, res) => {
+  const body = req.body as { walletAddress?: string };
+  const walletAddress = body?.walletAddress?.trim();
+  if (!walletAddress) {
+    res.status(400).json({ error: "walletAddress is required" });
+    return;
+  }
+
+  const authAddress = res.locals.authSession?.address as string | undefined;
+  if (authAddress && authAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+    res.status(403).json({ error: "Access denied: wallet mismatch" });
+    return;
+  }
+
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  (res as any).flushHeaders?.();
+
+  const emit = (event: string, data: Record<string, unknown>) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const emitLog = (
+    step: string,
+    message: string,
+    extra: Record<string, unknown> = {},
+    status: "running" | "done" | "error" = "done",
+  ) => {
+    emit("log", { step, message, status, ...extra });
+  };
+
+  try {
+    emitLog("fetch", "Fetching full on-chain activity for wallet…", {}, "running");
+    const activityObjects = await fetchWalletActivityObjects(walletAddress);
+    emitLog("fetch", `Found ${activityObjects.length} objects in wallet history`, { count: activityObjects.length });
+
+    const existing = await prisma.threat.findMany({
+      where: { walletAddress: { equals: walletAddress, mode: "insensitive" } },
+      select: { objectId: true, status: true },
+    });
+    const existingIds = new Set(existing.map((row) => row.objectId));
+    const toAnalyze = activityObjects.filter((object) => !existingIds.has(object.objectId));
+
+    emitLog("filter", `${toAnalyze.length} new objects to analyze (${existingIds.size} already known)`, { count: toAnalyze.length });
+
+    let quarantined = 0;
+    let safe = 0;
+    let cleaned = 0;
+
+    for (const object of toAnalyze) {
+      emitLog(
+        "analyze",
+        `Analyzing ${object.objectType}`,
+        { objectId: object.objectId, objectType: object.objectType, stillOwned: object.stillOwned },
+        "running",
+      );
+
+      try {
+        const verdict = await analyzeThreat({
+          objectId: object.objectId,
+          objectType: object.objectType,
+          senderAddress: walletAddress,
+          displayName: object.displayName,
+          displayUrl: object.displayUrl,
+          moveAbi: object.moveAbi,
+        });
+
+        if ((verdict.verdict === "MALICIOUS" || verdict.verdict === "SUSPICIOUS") && verdict.risk_score >= MIN_RISK_SCORE_FOR_QUARANTINE) {
+          const logPayload = buildThreatLog({
+            objectId: object.objectId,
+            objectType: object.objectType,
+            senderAddress: walletAddress,
+            displayName: object.displayName,
+            displayUrl: object.displayUrl,
+            verdict: verdict.verdict,
+            riskScore: verdict.risk_score,
+            reasonCode: verdict.reason_code,
+            confidence: verdict.confidence,
+            flags: verdict.flags,
+            reasoning: verdict.reasoning,
+          });
+
+          const walrusBlobId = await storeThreatLog(logPayload).catch(() => null);
+          const threat = await prisma.threat.create({
+            data: {
+              objectId: object.objectId,
+              objectType: object.objectType,
+              senderAddress: walletAddress,
+              walletAddress,
+              displayName: object.displayName ?? null,
+              displayUrl: object.displayUrl ?? null,
+              riskScore: verdict.risk_score,
+              verdict: verdict.verdict,
+              reasonCode: verdict.reason_code,
+              confidence: verdict.confidence,
+              flags: verdict.flags,
+              reasoning: verdict.reasoning,
+              cleanMethod: verdict.clean_method,
+              hasStoreAbility: false,
+              status: "quarantined",
+              walrusBlobId: walrusBlobId ?? null,
+            },
+          });
+
+          quarantined += 1;
+          emitLog(
+            "quarantine",
+            `Quarantined ${object.objectType}`,
+            { objectId: object.objectId, threatId: threat.id, riskScore: verdict.risk_score, verdict: verdict.verdict, stillOwned: object.stillOwned },
+          );
+
+          if (object.stillOwned && isOnChainEnabled()) {
+            emitLog("clean", `Attempting on-chain clean for ${object.objectId}…`, { objectId: object.objectId }, "running");
+
+            let burnDigest: string | null = null;
+
+            if (verdict.clean_method === "merge_dust") {
+              const coinType = object.objectType.match(/::coin::Coin<(.+)>$/)?.[1] ?? null;
+              if (coinType) {
+                const coins = await fetchCoinObjects(walletAddress, coinType);
+                if (coins.length >= 2) {
+                  burnDigest = await mergeDustOnChain({
+                    coinType,
+                    primaryCoinId: coins[0].coinObjectId,
+                    dustCoinIds: coins.slice(1).map((coin) => coin.coinObjectId),
+                  }).catch(() => null);
+                }
+              }
+            } else {
+              const abilities = await fetchObjectAbilities(object.objectType);
+              if (abilities.map((ability) => ability.toLowerCase()).includes("store")) {
+                burnDigest = await sendToDeadOnChain({
+                  objectId: object.objectId,
+                  objectType: object.objectType,
+                }).catch(() => null);
+              }
+            }
+
+            if (burnDigest) {
+              await prisma.threat.update({ where: { id: threat.id }, data: { status: "burned", burnTxDigest: burnDigest } }).catch(() => {});
+              cleaned += 1;
+              emitLog("clean", `Cleaned ${object.objectId}`, { objectId: object.objectId, burnTxDigest: burnDigest });
+            } else {
+              emitLog("clean", `Could not auto-clean ${object.objectId} (manual burn needed)`, { objectId: object.objectId }, "error");
+            }
+          } else if (!object.stillOwned) {
+            emitLog("skip", `Object no longer in wallet — skipping burn`, { objectId: object.objectId });
+          }
+        } else {
+          safe += 1;
+          emitLog("analyze", `Safe ${object.objectType}`, { objectId: object.objectId, riskScore: verdict.risk_score, verdict: verdict.verdict });
+        }
+      } catch (error) {
+        emitLog(
+          "analyze",
+          `Failed to analyze ${object.objectType}`,
+          { objectId: object.objectId, error: error instanceof Error ? error.message : String(error) },
+          "error",
+        );
+      }
+    }
+
+    emit("done", {
+      total: activityObjects.length,
+      analyzed: toAnalyze.length,
+      quarantined,
+      safe,
+      cleaned,
+    });
+  } catch (error) {
+    emit("error", { message: error instanceof Error ? error.message : "Clean scan failed" });
   } finally {
     res.end();
   }
