@@ -8,6 +8,13 @@ import { Button } from "@/components/ui/button";
 import { apiJson } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 
+function normalizeObjectType(objType: string | null | undefined) {
+  const s = String(objType ?? "");
+  const parts = s.split("::").filter(Boolean);
+  if (parts.length >= 2) return `${parts[parts.length - 2]}::${parts[parts.length - 1]}`;
+  return s;
+}
+
 type LogLevel = "info" | "success" | "warn" | "error";
 
 interface LogEntry {
@@ -292,7 +299,8 @@ export default function Wallets() {
     if (toDust.length > 0) {
       const byType: Record<string, string[]> = {};
       toDust.forEach(t => {
-        (byType[t.objectType] ??= []).push(t.objectId);
+        const key = normalizeObjectType(t.objectType);
+        (byType[key] ??= []).push(t.objectId);
       });
       for (const [coinType, ids] of Object.entries(byType)) {
         const ownedIds = ids.filter(id => resolvedObjects.some(r => r.objectId === id));
@@ -363,7 +371,7 @@ export default function Wallets() {
             key,
             mkLog(
               "info",
-              `  [${index + 1}] ${object.displayName ?? object.objectType}`,
+              `  [${index + 1}] ${object.displayName ?? normalizeObjectType(object.objectType)}`,
               `       ${object.objectId}`,
             ),
           );

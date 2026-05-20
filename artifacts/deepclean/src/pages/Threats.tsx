@@ -3,6 +3,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useListThreats, useReleaseThreat, useBurnThreat, getListThreatsQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+import { apiJson } from "@/lib/auth";
 import { Skeleton } from "@/components/ui/skeleton";
 import { VerdictBadge, StatusBadge, RiskBar } from "@/components/ThreatBadge";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,8 @@ export default function Threats() {
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+
+  const [bulkRunning, setBulkRunning] = useState(false);
 
   // Fetch all threats (not filtered by status) so we can show all lifecycle states
   const params = {
@@ -109,6 +112,61 @@ export default function Threats() {
               )}
             </button>
           ))}
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              className="text-xs px-3 py-2 rounded border border-border bg-card text-muted-foreground hover:bg-red-600/10"
+              onClick={async () => {
+                if (visibleThreats.length === 0) {
+                  toast({ title: "No quarantined threats", description: "Nothing to release" });
+                  return;
+                }
+                if (!confirm(`Release all ${visibleThreats.length} quarantined threats?`)) return;
+                setBulkRunning(true);
+                try {
+                  await Promise.all(
+                    visibleThreats.map((t) => apiJson(`/api/threats/${t.id}/release`, { method: "POST" }))
+                  );
+                  queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+                  toast({ title: "Released", description: `Released ${visibleThreats.length} threats` });
+                } catch (err) {
+                  toast({ title: "Release failed", description: String(err), variant: "destructive" });
+                } finally {
+                  setBulkRunning(false);
+                }
+              }}
+              disabled={bulkRunning || visibleThreats.length === 0}
+              data-testid="button-release-all"
+            >
+              Release All
+            </button>
+
+            <button
+              className="text-xs px-3 py-2 rounded border border-border bg-card text-muted-foreground hover:bg-red-600/10"
+              onClick={async () => {
+                if (visibleThreats.length === 0) {
+                  toast({ title: "No quarantined threats", description: "Nothing to burn" });
+                  return;
+                }
+                if (!confirm(`Burn all ${visibleThreats.length} quarantined threats? This is irreversible.`)) return;
+                setBulkRunning(true);
+                try {
+                  await Promise.all(
+                    visibleThreats.map((t) => apiJson(`/api/threats/${t.id}/burn`, { method: "POST" }))
+                  );
+                  queryClient.invalidateQueries({ queryKey: getListThreatsQueryKey() });
+                  toast({ title: "Burned", description: `Burned ${visibleThreats.length} threats` });
+                } catch (err) {
+                  toast({ title: "Burn failed", description: String(err), variant: "destructive" });
+                } finally {
+                  setBulkRunning(false);
+                }
+              }}
+              disabled={bulkRunning || visibleThreats.length === 0}
+              data-testid="button-burn-all"
+            >
+              Burn All
+            </button>
+          </div>
         </div>
       </div>
 

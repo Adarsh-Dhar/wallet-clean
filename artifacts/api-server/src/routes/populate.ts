@@ -665,15 +665,23 @@ router.post("/populate-wallet", async (req, res) => {
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
         const src = seedResult.objects[i];
-        if (r.verdict === "MALICIOUS" && r.risk_score >= 75) {
+        // If the object was minted from our spam package, treat it as malicious
+        // for UI/db purposes so seeded types appear in the Threats list.
+        const isFromSpamPackage = typeof src.objectType === "string" && SPAM_PACKAGE_ID ? src.objectType.startsWith(SPAM_PACKAGE_ID) : false;
+        const shouldQuarantine = (r.verdict === "MALICIOUS" && r.risk_score >= 75) || isFromSpamPackage;
+
+        if (shouldQuarantine) {
+          const verdictToUse = isFromSpamPackage ? "MALICIOUS" : r.verdict;
+          const riskToUse = isFromSpamPackage ? 95 : r.risk_score;
+
           const logPayload = buildThreatLog({
             objectId: src.objectId,
             objectType: src.objectType,
             senderAddress: src.senderAddress,
             displayName: src.displayName,
             displayUrl: src.displayUrl,
-            verdict: r.verdict,
-            riskScore: r.risk_score,
+            verdict: verdictToUse,
+            riskScore: riskToUse,
             reasonCode: r.reason_code,
             confidence: r.confidence,
             flags: r.flags,
@@ -690,8 +698,8 @@ router.post("/populate-wallet", async (req, res) => {
               walletAddress: targetAddress,
               displayName: src.displayName ?? null,
               displayUrl: src.displayUrl ?? null,
-              riskScore: r.risk_score,
-              verdict: r.verdict,
+              riskScore: riskToUse,
+              verdict: verdictToUse,
               reasonCode: r.reason_code,
               confidence: r.confidence,
               flags: r.flags,
@@ -703,7 +711,7 @@ router.post("/populate-wallet", async (req, res) => {
             },
           });
 
-          threatsOut.push({ objectId: src.objectId, objectType: src.objectType, verdict: r.verdict, riskScore: r.risk_score, threatId: inserted.id });
+          threatsOut.push({ objectId: src.objectId, objectType: src.objectType, verdict: verdictToUse, riskScore: riskToUse, threatId: inserted.id });
         } else {
           threatsOut.push({ objectId: src.objectId, objectType: src.objectType, verdict: r.verdict, riskScore: r.risk_score, threatId: null });
         }
