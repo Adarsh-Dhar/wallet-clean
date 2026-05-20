@@ -25,6 +25,7 @@ model Threat {
   flags              Json      @default("[]")
   reasoning          String
   cleanMethod        String    @default("transfer_to_dead") @map("clean_method")
+  hasStoreAbility    Boolean?  @map("has_store_ability")
   status             String    @default("quarantined") // "quarantined" | "released" | "burned"
   walrusBlobId       String?   @map("walrus_blob_id")
   quarantineTxDigest String?   @map("quarantine_tx_digest")

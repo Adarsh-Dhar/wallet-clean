@@ -42,7 +42,7 @@ module deepclean_spam::spam_threats_tests {
     fun test_spoofed_pool_mints() {
         let mut s = scenario();
         ts::next_tx(&mut s, OWNER);
-        pool::fake_mint(OWNER, ts::ctx(&mut s));
+        pool::mint(OWNER, ts::ctx(&mut s));
         ts::end(s);
     }
 

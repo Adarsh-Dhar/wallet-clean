@@ -21,6 +21,18 @@ import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { logger } from "./logger";
 
+// Re-export the resolved RPC URL so other modules can share the same network lookup.
+export function getSuiRpcUrl(): string {
+  const network = process.env["SUI_NETWORK"] ?? "testnet";
+  const urls: Record<string, string> = {
+    mainnet: "https://fullnode.mainnet.sui.io:443",
+    testnet: "https://fullnode.testnet.sui.io:443",
+    devnet: "https://fullnode.devnet.sui.io:443",
+    localnet: "http://127.0.0.1:9000",
+  };
+  return urls[network] ?? urls["testnet"]!;
+}
+
 // NOTE: Do NOT read env vars here — they may not be loaded yet!
 // Read them lazily when needed, inside functions.
 // Lazily created so the module loads even when env vars are absent
@@ -38,6 +50,76 @@ function getClient(): SuiJsonRpcClient {
     });
   }
   return _client;
+}
+
+/**
+ * Fetch the Move abilities of a struct from its package.
+ * Returns the abilities array (e.g. ["Key", "Store"]) or [] on failure.
+ * Used to gate send_to_dead - objects without "Store" cannot be transferred.
+ */
+export async function fetchObjectAbilities(objectType: string): Promise<string[]> {
+  try {
+    const parts = objectType.split("::");
+    const pkgAddress = parts[0];
+    const moduleName = parts[1];
+    const structName = parts[2]?.split("<")[0]; // strip generics e.g. Coin<T> -> Coin
+    if (!pkgAddress || !moduleName || !structName) return [];
+
+    const client = getClient();
+    const modules = await (client as any).getNormalizedMoveModulesByPackage({
+      package: pkgAddress,
+    });
+
+    const abilities: string[] =
+      modules?.[moduleName]?.structs?.[structName]?.abilities?.abilities ?? [];
+    return abilities;
+  } catch (err) {
+    logger.warn({ err, objectType }, "fetchObjectAbilities failed - assuming no store");
+    return [];
+  }
+}
+
+/**
+ * Fetch all coin objects of a given coinType owned by walletAddress.
+ * Returns the largest coin as primary (to merge into) and the rest as dust.
+ * Returns null if fewer than 2 coins exist (nothing to merge).
+ */
+export async function fetchCoinObjectsForWallet(
+  walletAddress: string,
+  coinType: string
+): Promise<{ primaryCoinId: string; dustCoinIds: string[] } | null> {
+  try {
+    const client = getClient();
+    const response = await client.getCoins({
+      owner: walletAddress,
+      coinType,
+      limit: 50,
+    });
+
+    const coins = response.data ?? [];
+    if (coins.length < 2) return null; // nothing to merge
+
+    // Sort descending by balance - use the largest as primary
+    coins.sort((a, b) => (BigInt(b.balance) > BigInt(a.balance) ? 1 : -1));
+
+    return {
+      primaryCoinId: coins[0].coinObjectId,
+      dustCoinIds: coins.slice(1).map((c) => c.coinObjectId),
+    };
+  } catch (err) {
+    logger.warn({ err, walletAddress, coinType }, "fetchCoinObjectsForWallet failed");
+    return null;
+  }
+}
+
+/**
+ * Extract the inner coin type T from a full Coin<T> object type string.
+ * e.g. "0x2::coin::Coin<0xspam::rug_token::MemeCoin>" -> "0xspam::rug_token::MemeCoin"
+ * Returns null if the input is not a Coin<T> type.
+ */
+export function extractCoinType(objectType: string): string | null {
+  const match = objectType.match(/::coin::Coin<(.+)>$/);
+  return match?.[1] ?? null;
 }
 
 export interface OnChainConfigStatus {
@@ -371,6 +453,16 @@ export async function sendToDeadOnChain(
   if (!isOnChainEnabled()) return null;
 
   try {
+    // Gate: object must have "Store" ability for public_transfer to work
+    const abilities = await fetchObjectAbilities(params.objectType);
+    if (!abilities.map((a) => a.toLowerCase()).includes("store")) {
+      logger.warn(
+        { objectType: params.objectType, abilities },
+        "send_to_dead skipped - object lacks 'store' ability and cannot be transferred"
+      );
+      return null;
+    }
+
     const AGENT_PRIV_KEY = process.env["AGENT_PRIVATE_KEY"]!;
     const PACKAGE_ID     = process.env["QUARANTINE_PACKAGE_ID"]!;
     const ADMIN_CAP_ID   = process.env["QUARANTINE_ADMIN_CAP_ID"]!;

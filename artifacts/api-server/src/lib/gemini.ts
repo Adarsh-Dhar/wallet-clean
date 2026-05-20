@@ -74,7 +74,6 @@ const KNOWN_ATTACK_MODULES = [
 const DEMO_JUNK_MODULES = [
   "malicious_airdrop",
   "fake_foundation_nft",
-  "pool",
   "honeypot_defi",
   "rug_token",
 ];
@@ -99,6 +98,17 @@ const SUSPICIOUS_URL_PATTERNS = [
   /suifoundation\-/, /sui\-f/, /offici[a4]l/, /0fficial/,
 ];
 
+function isTrustedDomain(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return TRUSTED_DOMAINS.some(
+      (d) => hostname === d || hostname.endsWith("." + d)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function extractStaticSignals(input: ThreatAnalysisInput): StaticSignals {
   const pkgAddress = input.objectType.split("::")[0]?.toLowerCase() ?? "";
   const moduleSegment = input.objectType.split("::")?.[1]?.toLowerCase() ?? "";
@@ -116,12 +126,21 @@ export function extractStaticSignals(input: ThreatAnalysisInput): StaticSignals 
 
   const hasHomoglyphUrl = url.length > 0 && /[^\x00-\x7F]/.test(url);
 
-  const hasDigitSubstitution =
-    /[a-z]0[a-z]/i.test(url) ||
-    /[a-z]1[a-z]/i.test(url) ||
-    /su[i1][\.\-]/.test(url);
+  const hasDigitSubstitution = (() => {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      return (
+        /[a-z]0[a-z]/.test(hostname) ||
+        /[a-z]1[a-z]/.test(hostname) ||
+        /su[i1][\.\-]/.test(hostname)
+      );
+    } catch {
+      return false;
+    }
+  })();
 
   const hasSuspiciousTld =
+    !isTrustedDomain(url) &&
     SUSPICIOUS_URL_PATTERNS.some((p) => p.test(url));
 
   const hasDangerousAbi =
@@ -145,7 +164,7 @@ export function extractStaticSignals(input: ThreatAnalysisInput): StaticSignals 
   // Heuristic: very new-looking domains (no WHOIS here, just structural signals)
   const domainAgeSuspicion =
     (hasSuspiciousTld || hasDigitSubstitution || hasHomoglyphUrl) &&
-    !TRUSTED_DOMAINS.some((d) => url.includes(d));
+    !isTrustedDomain(url);
 
   return {
     isKnownSafePackage,
@@ -661,15 +680,7 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
   }
 
   // ── SAFE: Known legitimate external domains ────────────────────────────────
-  const SAFE_DOMAINS = [
-    "circle.com",
-    "bluemove.net",
-    "cryptopunks.app",
-    "suiexplorer.com",
-    "mysten.xyz",
-    "sui.io",
-  ];
-  if (url && SAFE_DOMAINS.some((d) => url.includes(d))) {
+  if (url && isTrustedDomain(url)) {
     return {
       risk_score: 8,
       verdict: "SAFE",
@@ -685,14 +696,14 @@ function mockAnalysis(input: ThreatAnalysisInput): ThreatAnalysisOutput {
   // ── SAFE: Completely empty metadata ───────────────────────────────────────
   if (!url && !input.displayName && !abi) {
     return {
-      risk_score: 20,
-      verdict: "SAFE",
+      risk_score: 45,
+      verdict: "SUSPICIOUS",
       reason_code: 5,
-      confidence: 0.40,
-      flags: ["No metadata available"],
+      confidence: 0.35,
+      flags: ["NO_METADATA"],
       clean_method: "release",
       reasoning:
-        "Insufficient metadata to determine threat status. No malicious indicators found, but confidence is low.",
+        "No metadata available to assess this object. Cannot confirm safety - flagged for manual review.",
     };
   }
 

@@ -11,8 +11,63 @@ import {
 } from "@workspace/api-zod";
 import { analyzeThreat, extractStaticSignals } from "../lib/gemini";
 import { storeThreatLog, buildThreatLog } from "../lib/walrus";
-import { quarantineOnChain, isOnChainEnabled, sendToDeadOnChain } from "../lib/onchain";
+import {
+  quarantineOnChain,
+  isOnChainEnabled,
+  sendToDeadOnChain,
+  mergeDustOnChain,
+  getSuiRpcUrl,
+} from "../lib/onchain";
 import { MIN_RISK_SCORE_FOR_QUARANTINE } from "../lib/constants";
+
+async function fetchObjectAbilities(objectType: string): Promise<string[]> {
+  try {
+    const parts = objectType.split("::");
+    const pkgAddress = parts[0];
+    const moduleName = parts[1];
+    const structName = parts[2]?.split("<")[0];
+    if (!pkgAddress || !moduleName || !structName) return [];
+
+    const response = await fetch(getSuiRpcUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "sui_getNormalizedMoveModulesByPackage",
+        params: [pkgAddress],
+      }),
+    });
+    const json = (await response.json().catch(() => null)) as any;
+    return json?.result?.[moduleName]?.structs?.[structName]?.abilities?.abilities ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchCoinObjects(
+  walletAddress: string,
+  coinType: string
+): Promise<{ coinObjectId: string; balance: string }[]> {
+  try {
+    const response = await fetch(getSuiRpcUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "suix_getCoins",
+        params: [walletAddress, coinType, null, 50],
+      }),
+    });
+    const json = (await response.json().catch(() => null)) as any;
+    const coins: { coinObjectId: string; balance: string }[] = json?.result?.data ?? [];
+    coins.sort((a, b) => (BigInt(b.balance) > BigInt(a.balance) ? 1 : -1));
+    return coins;
+  } catch {
+    return [];
+  }
+}
 
 const router = Router();
 
@@ -213,7 +268,7 @@ router.post("/threats/:id/release", async (req, res) => {
     return;
   }
 
-  const existing = await prisma.threat.findUnique({ where: { id: params.data.id } });
+  const existing = (await prisma.threat.findUnique({ where: { id: params.data.id } })) as any;
   if (!existing) {
     res.status(404).json({ error: "Threat not found" });
     return;
@@ -248,7 +303,7 @@ router.post("/threats/:id/burn", async (req, res) => {
     return;
   }
 
-  const existing = await prisma.threat.findUnique({ where: { id: params.data.id } });
+  const existing = (await prisma.threat.findUnique({ where: { id: params.data.id } })) as any;
   if (!existing) {
     res.status(404).json({ error: "Threat not found" });
     return;
@@ -268,10 +323,46 @@ router.post("/threats/:id/burn", async (req, res) => {
   //    roll back the DB status; the metadata burn is the source of truth)
   let burnTxDigest: string | null = null;
   if (isOnChainEnabled()) {
-    burnTxDigest = await sendToDeadOnChain({
-      objectId:   existing.objectId,
-      objectType: existing.objectType,
-    }).catch(() => null);
+    if (existing.cleanMethod === "merge_dust") {
+      const coinTypeMatch = existing.objectType.match(/::coin::Coin<(.+)>$/);
+      const coinType = coinTypeMatch?.[1] ?? null;
+
+      if (coinType && existing.walletAddress) {
+        const coins = await fetchCoinObjects(existing.walletAddress, coinType);
+        if (coins.length >= 2) {
+          burnTxDigest = await mergeDustOnChain({
+            coinType,
+            primaryCoinId: coins[0].coinObjectId,
+            dustCoinIds: coins.slice(1).map((coin) => coin.coinObjectId),
+          }).catch(() => null);
+        } else if (coins.length === 1) {
+          const abilities = existing.hasStoreAbility
+            ? ["Store"]
+            : await fetchObjectAbilities(existing.objectType);
+          if (abilities.map((ability) => ability.toLowerCase()).includes("store")) {
+            burnTxDigest = await sendToDeadOnChain({
+              objectId: existing.objectId,
+              objectType: existing.objectType,
+            }).catch(() => null);
+          }
+        }
+      }
+    } else if (existing.cleanMethod === "transfer_to_dead" || existing.cleanMethod === "vault_burn") {
+      const abilities = existing.hasStoreAbility
+        ? ["Store"]
+        : await fetchObjectAbilities(existing.objectType);
+      if (abilities.map((ability) => ability.toLowerCase()).includes("store")) {
+        burnTxDigest = await sendToDeadOnChain({
+          objectId: existing.objectId,
+          objectType: existing.objectType,
+        }).catch(() => null);
+      } else {
+        req.log.warn(
+          { objectId: existing.objectId, abilities },
+          "Object lacks store ability — send_to_dead skipped"
+        );
+      }
+    }
 
     if (burnTxDigest) {
       await prisma.threat.update({
@@ -280,8 +371,8 @@ router.post("/threats/:id/burn", async (req, res) => {
       }).catch(() => {});
     } else {
       req.log.warn(
-        { objectId: existing.objectId },
-        "on-chain send_to_dead failed or skipped — DB burn still recorded"
+        { objectId: existing.objectId, cleanMethod: existing.cleanMethod },
+        "on-chain clean failed or skipped - DB burn still recorded"
       );
     }
   }
@@ -316,6 +407,7 @@ router.post("/clean-wallet", async (req, res) => {
     select: {
       id: true,
       objectId: true,
+      objectType: true,
     },
   });
 
@@ -344,30 +436,113 @@ router.post("/clean-wallet", async (req, res) => {
 
   req.log.info({ count: idsToUpdate.length, digest }, "Wallet-signed deep clean recorded");
 
-  // Fire-and-forget: call vault_burn server-side for threats classified as vault_burn
+  // Best-effort server-side cleanup for every selected object.
+  // The wallet-signed PTB remains the source of truth for disposal.
+  let serverBurnedCount = 0;
   if (isOnChainEnabled()) {
-    const vaultBurnThreats = await prisma.threat.findMany({
-      where: { id: { in: idsToUpdate }, cleanMethod: "vault_burn" },
-      select: { id: true, objectId: true, objectType: true },
+    const deadThreats = await prisma.threat.findMany({
+      where: {
+        id: { in: idsToUpdate },
+        cleanMethod: { in: ["transfer_to_dead", "vault_burn"] },
+      },
+      select: { id: true, objectId: true, objectType: true, hasStoreAbility: true },
     });
-    Promise.allSettled(
-      vaultBurnThreats.map(t =>
-        sendToDeadOnChain({ objectId: t.objectId, objectType: t.objectType })
-          .then((digest) =>
-            digest
-              ? prisma.threat.update({
-                  where: { id: t.id },
-                  data: { burnTxDigest: digest },
-                })
-              : null
-          )
-      )
-    ).catch(() => {});
+
+    const dustThreats = await prisma.threat.findMany({
+      where: { id: { in: idsToUpdate }, cleanMethod: "merge_dust" },
+      select: { id: true, objectId: true, objectType: true, walletAddress: true, hasStoreAbility: true },
+    });
+
+    const dustGroups = Object.values(
+      dustThreats.reduce((acc, threat) => {
+        const coinTypeMatch = threat.objectType.match(/::coin::Coin<(.+)>$/);
+        const coinType = coinTypeMatch?.[1] ?? null;
+        if (!coinType || !threat.walletAddress) return acc;
+        const key = `${threat.walletAddress}::${coinType}`;
+        if (!acc[key]) {
+          acc[key] = { walletAddress: threat.walletAddress, coinType, threats: [] as typeof dustThreats };
+        }
+        acc[key].threats.push(threat);
+        return acc;
+      }, {} as Record<string, { walletAddress: string; coinType: string; threats: typeof dustThreats }>)
+    );
+
+    const settled = await Promise.allSettled([
+      ...deadThreats.map(async (threat) => {
+        const abilities = threat.hasStoreAbility
+          ? ["Store"]
+          : await fetchObjectAbilities(threat.objectType);
+        if (!abilities.map((ability) => ability.toLowerCase()).includes("store")) {
+          req.log.warn({ objectId: threat.objectId }, "Object lacks store ability — send_to_dead skipped");
+          return null;
+        }
+
+        const burnDigest = await sendToDeadOnChain({
+          objectId: threat.objectId,
+          objectType: threat.objectType,
+        }).catch(() => null);
+
+        if (burnDigest) {
+          await prisma.threat.update({
+            where: { id: threat.id },
+            data:  { burnTxDigest: burnDigest },
+          }).catch(() => {});
+        }
+        return burnDigest;
+      }),
+      ...dustGroups.map(async ({ walletAddress, coinType, threats }) => {
+        const coins = await fetchCoinObjects(walletAddress, coinType);
+        if (coins.length >= 2) {
+          const burnDigest = await mergeDustOnChain({
+            coinType,
+            primaryCoinId: coins[0].coinObjectId,
+            dustCoinIds: coins.slice(1).map((coin) => coin.coinObjectId),
+          }).catch(() => null);
+
+          if (burnDigest) {
+            await prisma.threat.updateMany({
+              where: { id: { in: threats.map((threat) => threat.id) } },
+              data:  { burnTxDigest: burnDigest },
+            }).catch(() => {});
+          }
+          return burnDigest;
+        }
+
+        if (coins.length === 1) {
+          const firstThreat = threats[0];
+          const abilities = firstThreat.hasStoreAbility
+            ? ["Store"]
+            : await fetchObjectAbilities(firstThreat.objectType);
+          if (!abilities.map((ability) => ability.toLowerCase()).includes("store")) {
+            return null;
+          }
+
+          const burnDigest = await sendToDeadOnChain({
+            objectId: firstThreat.objectId,
+            objectType: firstThreat.objectType,
+          }).catch(() => null);
+          if (burnDigest) {
+            await prisma.threat.updateMany({
+              where: { id: { in: threats.map((threat) => threat.id) } },
+              data:  { burnTxDigest: burnDigest },
+            }).catch(() => {});
+          }
+          return burnDigest;
+        }
+
+        req.log.warn({ walletAddress, coinType }, "merge_dust skipped - no coin objects found");
+        return null;
+      }),
+    ]);
+
+    serverBurnedCount = settled.filter(
+      (result) => result.status === "fulfilled" && result.value !== null
+    ).length;
   }
 
   res.json({
     cleaned: idsToUpdate.length,
-    onChainBurned: idsToUpdate.length,
+    onChainBurned: serverBurnedCount,
     threats: quarantined.map((t) => ({
       id: t.id,
       objectId: t.objectId,

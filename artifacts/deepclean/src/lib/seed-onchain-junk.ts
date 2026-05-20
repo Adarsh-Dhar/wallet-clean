@@ -25,13 +25,11 @@
  */
 
 import "dotenv/config";
-import {
-  SuiJsonRpcClient,
-  getJsonRpcFullnodeUrl,
-} from "@mysten/sui/jsonRpc";
-import { Transaction } from "@mysten/sui/transactions";
-import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
+// Use dynamic imports to avoid type conflicts across different @mysten/sui versions
+const { SuiJsonRpcClient, getJsonRpcFullnodeUrl } = await import("@mysten/sui/jsonRpc");
+const { Transaction } = await import("@mysten/sui/transactions");
+const { Ed25519Keypair } = await import("@mysten/sui/keypairs/ed25519");
+const { decodeSuiPrivateKey } = await import("@mysten/sui/cryptography");
 
 // ─── CLI arg parsing ──────────────────────────────────────────────────────────
 
@@ -84,7 +82,7 @@ if (!PACKAGE_ID)      fatal("--package (or SPAM_PACKAGE_ID env) is required");
 
 // ─── Keypair ──────────────────────────────────────────────────────────────────
 
-function loadKeypair(raw: string): Ed25519Keypair {
+function loadKeypair(raw: string): any {
   try {
     // Supports both "suiprivkey..." bech32 format and raw base64
     const decoded = decodeSuiPrivateKey(raw);
@@ -112,12 +110,12 @@ const client = new SuiJsonRpcClient({
  * Sign, execute, and wait for a PTB.
  * Returns the transaction digest on success.
  */
-async function executeAndWait(tx: Transaction): Promise<string> {
+async function executeAndWait(tx: any): Promise<string> {
   const result = await client.signAndExecuteTransaction({
-    signer: keypair,
-    transaction: tx,
+    signer: keypair as any,
+    transaction: tx as any,
     options: { showEffects: true, showObjectChanges: true },
-  });
+  } as any);
 
   const status = result.effects?.status?.status;
   if (status !== "success") {
@@ -140,15 +138,11 @@ async function executeAndWait(tx: Transaction): Promise<string> {
  */
 async function mintAirdropToken(target: string): Promise<string> {
   const tx = new Transaction();
-
-  // Call mint — result is the AirdropToken owned by the tx sender
-  const [token] = tx.moveCall({
+  // Call mint with recipient address (module accepts recipient)
+  tx.moveCall({
     target: `${PACKAGE_ID}::malicious_airdrop::mint`,
-    arguments: [],
+    arguments: [tx.pure.address(target)],
   });
-
-  // Transfer immediately to target wallet
-  tx.transferObjects([token], tx.pure.address(target));
 
   return executeAndWait(tx);
 }
@@ -177,31 +171,25 @@ async function mintRugToken(target: string): Promise<string> {
  */
 async function mintFakeFoundationNft(target: string): Promise<string> {
   const tx = new Transaction();
-
-  const [nft] = tx.moveCall({
+  tx.moveCall({
     target: `${PACKAGE_ID}::fake_foundation_nft::mint`,
-    arguments: [],
+    arguments: [tx.pure.address(target)],
   });
-
-  tx.transferObjects([nft], tx.pure.address(target));
 
   return executeAndWait(tx);
 }
 
 /**
- * pool::fake_mint(ctx) → Position → transfer to target
- *
- * Move signature: public fun fake_mint(ctx: &mut TxContext)
+ * pool::mint(ctx) → Position → transfer to target
+
+ * Move signature: public fun mint(ctx: &mut TxContext)
  */
 async function mintSpoofedPool(target: string): Promise<string> {
   const tx = new Transaction();
-
-  const [position] = tx.moveCall({
-    target: `${PACKAGE_ID}::pool::fake_mint`,
-    arguments: [],
+  tx.moveCall({
+    target: `${PACKAGE_ID}::pool::mint`,
+    arguments: [tx.pure.address(target)],
   });
-
-  tx.transferObjects([position], tx.pure.address(target));
 
   return executeAndWait(tx);
 }
@@ -213,13 +201,10 @@ async function mintSpoofedPool(target: string): Promise<string> {
  */
 async function mintHoneypotToken(target: string): Promise<string> {
   const tx = new Transaction();
-
-  const [token] = tx.moveCall({
+  tx.moveCall({
     target: `${PACKAGE_ID}::honeypot_defi::stake_and_receive`,
-    arguments: [],
+    arguments: [tx.pure.address(target)],
   });
-
-  tx.transferObjects([token], tx.pure.address(target));
 
   return executeAndWait(tx);
 }

@@ -2,7 +2,13 @@
 import { prisma } from "@workspace/db";
 import { analyzeThreat } from "./gemini";
 import { storeThreatLog, buildThreatLog } from "./walrus";
-import { quarantineOnChain, isOnChainEnabled } from "./onchain";
+import {
+  quarantineOnChain,
+  sendToDeadOnChain,
+  mergeDustOnChain,
+  isOnChainEnabled,
+  extractCoinType,
+} from "./onchain";
 import { logger } from "./logger";
 import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
 import { MIN_RISK_SCORE_FOR_QUARANTINE } from "./constants";
@@ -175,6 +181,62 @@ async function fetchObjectType(objectId: string): Promise<{ type: string } | nul
   }
 }
 
+// Fetches Move struct abilities for objectType via the package's normalized modules.
+// Returns array of ability strings e.g. ["Key", "Store"] or ["Key"].
+// Returns [] on failure — caller must treat missing Store as uncleanable.
+async function fetchObjectAbilities(objectType: string): Promise<string[]> {
+  try {
+    const parts = objectType.split("::");
+    const pkgAddress = parts[0];
+    const moduleName = parts[1];
+    const structName = parts[2]?.split("<")[0];
+    if (!pkgAddress || !moduleName || !structName) return [];
+    const modules = await suiRpc<Record<string, {
+      structs?: Record<string, { abilities?: { abilities?: string[] } }>;
+    }>>("sui_getNormalizedMoveModulesByPackage", [pkgAddress]);
+    return modules?.[moduleName]?.structs?.[structName]?.abilities?.abilities ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// Fetches all public function names from the object's module.
+// Used to give the AI ABI context so it can detect drain/sweep patterns.
+async function fetchObjectAbi(objectType: string): Promise<string | null> {
+  try {
+    const parts = objectType.split("::");
+    const pkgAddress = parts[0];
+    const moduleName = parts[1];
+    if (!pkgAddress || !moduleName) return null;
+    const modules = await suiRpc<Record<string, {
+      exposedFunctions?: Record<string, unknown>;
+    }>>("sui_getNormalizedMoveModulesByPackage", [pkgAddress]);
+    const fns = modules?.[moduleName]?.exposedFunctions;
+    if (!fns) return null;
+    return Object.keys(fns).join("\n");
+  } catch {
+    return null;
+  }
+}
+
+// Fetches all coin objects of a given coinType owned by walletAddress.
+// Sorts by balance descending so index 0 is the largest (used as primary for merge).
+async function fetchCoinObjects(
+  walletAddress: string,
+  coinType: string
+): Promise<{ coinObjectId: string; balance: string }[]> {
+  try {
+    const result = await suiRpc<{
+      data?: { coinObjectId: string; balance: string }[];
+    }>("suix_getCoins", [walletAddress, coinType, null, 50]);
+    const coins = result?.data ?? [];
+    coins.sort((a, b) => (BigInt(b.balance) > BigInt(a.balance) ? 1 : -1));
+    return coins;
+  } catch {
+    return [];
+  }
+}
+
 async function analyzeAndStore(
   objectId: string,
   objectType: string,
@@ -182,6 +244,19 @@ async function analyzeAndStore(
   walletAddress: string,
 ): Promise<void> {
   try {
+    // Skip if already analyzed - use DB as authoritative dedup source
+    const alreadyAnalyzed = await prisma.threat.findFirst({
+      where: { objectId },
+      select: { id: true, verdict: true, status: true },
+    });
+    if (alreadyAnalyzed) {
+      logger.debug(
+        { objectId, verdict: alreadyAnalyzed.verdict, status: alreadyAnalyzed.status },
+        "Object already in DB - skipping re-analysis"
+      );
+      return;
+    }
+
     // If this objectType matches one of the demo junk modules, provide a
     // human-friendly displayName so seeded objects show correct labels in the UI.
     const moduleSegment = objectType.split("::")?.[1]?.toLowerCase() ?? "";
@@ -198,7 +273,17 @@ async function analyzeAndStore(
     const inferredDisplayName = DEMO_LABELS[moduleSegment] ?? null;
     logger.info({ moduleSegment, inferredDisplayName, allLabelsForDebug: Object.keys(DEMO_LABELS) }, "Display name lookup result");
 
-    const verdict = await analyzeThreat({ objectId, objectType, senderAddress, displayName: inferredDisplayName });
+    const moveAbi = await fetchObjectAbi(objectType);
+    const abilities = await fetchObjectAbilities(objectType);
+    const hasStoreAbility = abilities.map((ability) => ability.toLowerCase()).includes("store");
+
+    const verdict = await analyzeThreat({
+      objectId,
+      objectType,
+      senderAddress,
+      displayName: inferredDisplayName,
+      moveAbi,
+    });
 
     const logPayload = buildThreatLog({
       objectId, objectType, senderAddress,
@@ -230,6 +315,8 @@ async function analyzeAndStore(
             confidence: verdict.confidence,
             flags:      verdict.flags,
             reasoning:  verdict.reasoning,
+            cleanMethod: verdict.clean_method,
+            hasStoreAbility,
             status:     "quarantined",
             walrusBlobId: null, // backfilled below
           },
@@ -279,6 +366,78 @@ async function analyzeAndStore(
       });
 
       logger.warn({ id: inserted.id, objectId, riskScore: verdict.risk_score }, "Threat auto-quarantined");
+
+      // Execute the appropriate on-chain disposal command based on what the AI decided
+      if (isOnChainEnabled()) {
+        const cleanMethod = verdict.clean_method;
+
+        if (cleanMethod === "transfer_to_dead" || cleanMethod === "vault_burn") {
+          if (hasStoreAbility) {
+            const burnDigest = await sendToDeadOnChain({
+              objectId,
+              objectType,
+            }).catch(() => null);
+
+            if (burnDigest) {
+              await prisma.threat.update({
+                where: { id: inserted.id },
+                data: { burnTxDigest: burnDigest, status: "burned" },
+              }).catch(() => {});
+              logger.info({ objectId, cleanMethod, burnDigest }, "Object sent to dead address");
+            } else {
+              logger.warn(
+                { objectId, cleanMethod },
+                "send_to_dead failed or skipped (object may lack store ability) - DB record stays quarantined"
+              );
+            }
+          } else {
+            logger.warn({ objectId, abilities }, "Object lacks store ability - send_to_dead skipped");
+          }
+
+        } else if (cleanMethod === "merge_dust") {
+          // Extract coinType T from "0x2::coin::Coin<T>"
+          const coinType = extractCoinType(objectType);
+          if (coinType && walletAddress) {
+            const coins = await fetchCoinObjects(walletAddress, coinType);
+            if (coins.length >= 2) {
+              const dustDigest = await mergeDustOnChain({
+                coinType,
+                primaryCoinId: coins[0].coinObjectId,
+                dustCoinIds: coins.slice(1).map((coin) => coin.coinObjectId),
+              }).catch(() => null);
+
+              if (dustDigest) {
+                await prisma.threat.update({
+                  where: { id: inserted.id },
+                  data: { burnTxDigest: dustDigest, status: "burned" },
+                }).catch(() => {});
+                logger.info({ objectId, coinType, dustDigest }, "Dust coins merged and sent to dead");
+              } else {
+                logger.warn({ objectId, coinType }, "merge_dust failed - coins remain in wallet");
+              }
+            } else if (coins.length === 1) {
+              if (hasStoreAbility) {
+                const burnDigest = await sendToDeadOnChain({
+                  objectId,
+                  objectType,
+                }).catch(() => null);
+
+                if (burnDigest) {
+                  await prisma.threat.update({
+                    where: { id: inserted.id },
+                    data: { burnTxDigest: burnDigest, status: "burned" },
+                  }).catch(() => {});
+                }
+              }
+            } else {
+              logger.warn({ objectId, coinType }, "No coin objects found for merge_dust - skipping");
+            }
+          } else {
+            logger.warn({ objectId, objectType }, "merge_dust skipped - could not extract coinType");
+          }
+        }
+        // "release" clean_method means SAFE - no on-chain disposal needed
+      }
     } else {
       storeThreatLog(logPayload).catch(() => {});
       logger.info({ objectId, riskScore: verdict.risk_score }, "Object cleared by AI");

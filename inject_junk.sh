@@ -167,7 +167,7 @@ run_call "MemeCoin" "rug_token" "airdrop_to" \
   --args "$TARGET"
 
 echo "  ── Object 5: pool::Position ───────────────────"
-run_call "Position" "pool" "fake_mint"
+run_call "Position" "pool" "mint"
 
 # ── Transfer minted objects to target ────────────────────────────────────────
 

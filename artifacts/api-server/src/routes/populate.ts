@@ -122,7 +122,7 @@ async function seedOnChainJunk(
       logMoveFunctionSig("malicious_airdrop", "mint"),
       logMoveFunctionSig("rug_token", "airdrop_to"),
       logMoveFunctionSig("fake_foundation_nft", "mint"),
-      logMoveFunctionSig("pool", "fake_mint"),
+      logMoveFunctionSig("pool", "mint"),
       logMoveFunctionSig("honeypot_defi", "stake_and_receive"),
     ]);
 
@@ -189,12 +189,11 @@ async function seedOnChainJunk(
 
       tx.moveCall({
         target: `${spamPackageId}::malicious_airdrop::mint`,
-        arguments: [],
+        arguments: [tx.pure.address(targetAddress)],
       });
 
       const res = await executeAndGetResult(tx);
 
-      // Prefer effects.created (array of created object refs). Fall back to objectChanges if present.
       const createdFromEffects = (((res as any).effects?.created) ?? []).map((c: any) => c?.reference?.objectId).filter(Boolean);
       const createdFromChanges = (((res as any).effects?.objectChanges) ?? []).filter((c: any) => c.type === "created").map((c: any) => c.objectId);
       const created = createdFromEffects.length ? createdFromEffects : createdFromChanges;
@@ -204,13 +203,6 @@ async function seedOnChainJunk(
         throw new Error("Mint did not create expected AirdropToken — see server logs for effects");
       }
 
-      const objId = created[0];
-      // Small delay to reduce race/lock issues on the node before building the follow-up transfer TX.
-      await new Promise((r) => setTimeout(r, 500));
-      const tx2 = new Transaction();
-      tx2.setSender(agentAddress);
-      tx2.transferObjects([tx2.object(objId)], tx2.pure.address(targetAddress));
-      await executeAndWait(tx2);
       return res.digest;
     }
 
@@ -229,7 +221,7 @@ async function seedOnChainJunk(
 
       tx.moveCall({
         target: `${spamPackageId}::fake_foundation_nft::mint`,
-        arguments: [],
+        arguments: [tx.pure.address(targetAddress)],
       });
 
       const res = await executeAndGetResult(tx);
@@ -242,12 +234,6 @@ async function seedOnChainJunk(
         throw new Error("Mint did not create expected FounderPass — see server logs for effects");
       }
 
-      const objId = createdNft[0];
-      await new Promise((r) => setTimeout(r, 500));
-      const tx2 = new Transaction();
-      tx2.setSender(agentAddress);
-      tx2.transferObjects([tx2.object(objId)], tx2.pure.address(targetAddress));
-      await executeAndWait(tx2);
       return res.digest;
     }
 
@@ -256,8 +242,8 @@ async function seedOnChainJunk(
       tx.setSender(agentAddress);
 
       tx.moveCall({
-        target: `${spamPackageId}::pool::fake_mint`,
-        arguments: [],
+        target: `${spamPackageId}::pool::mint`,
+        arguments: [tx.pure.address(targetAddress)],
       });
 
       const res = await executeAndGetResult(tx);
@@ -270,12 +256,6 @@ async function seedOnChainJunk(
         throw new Error("Mint did not create expected Position — see server logs for effects");
       }
 
-      const objId = createdPool[0];
-      await new Promise((r) => setTimeout(r, 500));
-      const tx2 = new Transaction();
-      tx2.setSender(agentAddress);
-      tx2.transferObjects([tx2.object(objId)], tx2.pure.address(targetAddress));
-      await executeAndWait(tx2);
       return res.digest;
     }
 
@@ -285,7 +265,7 @@ async function seedOnChainJunk(
 
       tx.moveCall({
         target: `${spamPackageId}::honeypot_defi::stake_and_receive`,
-        arguments: [],
+        arguments: [tx.pure.address(targetAddress)],
       });
 
       const res = await executeAndGetResult(tx);
@@ -298,12 +278,6 @@ async function seedOnChainJunk(
         throw new Error("Mint did not create expected HoneypotToken — see server logs for effects");
       }
 
-      const objId = createdHoney[0];
-      await new Promise((r) => setTimeout(r, 500));
-      const tx2 = new Transaction();
-      tx2.setSender(agentAddress);
-      tx2.transferObjects([tx2.object(objId)], tx2.pure.address(targetAddress));
-      await executeAndWait(tx2);
       return res.digest;
     }
 
